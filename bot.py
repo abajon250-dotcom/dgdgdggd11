@@ -11,7 +11,7 @@ from datetime import datetime, timedelta
 from typing import List, Dict, Any, Optional, Tuple
 
 from dotenv import load_dotenv
-from aiogram import Bot, Dispatcher, types
+from aiogram import Bot, Dispatcher
 from aiogram.filters import Command, StateFilter
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
@@ -393,6 +393,7 @@ async def enter_vk_token(callback: CallbackQuery, state: FSMContext):
                          "Токен должен иметь право на отправку сообщений (scope: messages).\n"
                          "Получить токен можно здесь: https://vkhost.github.io", parse_mode="HTML")
     await state.set_state(BotStates.waiting_vk_token)
+    # Удаляем сообщение с кнопками, чтобы не мешало
     await callback.message.delete()
 
 @dp.message(BotStates.waiting_vk_token)
@@ -657,6 +658,7 @@ async def process_template_delay(message: Message, state: FSMContext):
     await save_template(message.from_user.id, name, content, delay)
     await message.answer(f"✅ Шаблон <b>{name}</b> сохранён с задержкой {delay} с!", parse_mode="HTML")
     await state.clear()
+    await message.answer("Главное меню:", reply_markup=main_menu(message.from_user.id))
 
 @dp.callback_query(lambda c: c.data == "delete_template")
 async def delete_template_callback(callback: CallbackQuery):
@@ -676,6 +678,7 @@ async def confirm_delete_template(callback: CallbackQuery):
     await delete_template(tpl_id, callback.from_user.id)
     await callback.answer("✅ Шаблон удалён", show_alert=True)
     await callback.message.delete()
+    await callback.message.answer("Главное меню:", reply_markup=main_menu(callback.from_user.id))
 
 @dp.callback_query(lambda c: c.data == "my_profile")
 async def show_profile(callback: CallbackQuery, state: FSMContext):
@@ -698,7 +701,7 @@ async def show_profile(callback: CallbackQuery, state: FSMContext):
         f"⏳ Подписка до: {sub_text}\n\n"
         f"<tg-emoji emoji-id='5472096095280572227'></tg-emoji> Сменить токен можно через кнопку «Ввести токен VK»"
     )
-    await callback.message.answer(text, parse_mode="HTML")
+    await callback.message.answer(text, parse_mode="HTML", reply_markup=main_menu(uid))
 
 @dp.callback_query(lambda c: c.data == "my_stats")
 async def user_stats(callback: CallbackQuery, state: FSMContext):
@@ -713,7 +716,7 @@ async def user_stats(callback: CallbackQuery, state: FSMContext):
         text += f"🗓 {s['started_at'].strftime('%Y-%m-%d %H:%M')}\n"
         text += f"👤 VK: {s['vk_account_name']}\n"
         text += f"📊 Всего: {s['total_recipients']} | <tg-emoji emoji-id='5206401524200145033'></tg-emoji>{s['sent_success']} <tg-emoji emoji-id='5206510891247371052'></tg-emoji>{s['sent_error']} | ⏱{s['total_time_seconds']:.1f}с\n\n"
-    await callback.message.answer(text[:4000], parse_mode="HTML")
+    await callback.message.answer(text[:4000], parse_mode="HTML", reply_markup=main_menu(uid))
 
 @dp.callback_query(lambda c: c.data == "admin_panel" and c.from_user.id in ADMIN_IDS)
 async def admin_panel(callback: CallbackQuery, state: FSMContext):
@@ -769,6 +772,7 @@ async def admin_broadcast_process(message: Message, state: FSMContext):
             pass
     await message.answer(f"✅ Рассылка завершена. Отправлено {sent} из {len(users)} пользователей.")
     await state.clear()
+    await message.answer("Главное меню:", reply_markup=main_menu(message.from_user.id))
 
 @dp.message(BotStates.admin_waiting_user_id)
 async def admin_get_user_id(message: Message, state: FSMContext):
@@ -799,6 +803,7 @@ async def admin_give_days(message: Message, state: FSMContext):
     except:
         pass
     await state.clear()
+    await message.answer("Главное меню:", reply_markup=main_menu(message.from_user.id))
 
 @dp.message(Command("revoke_sub"))
 async def cmd_revoke_sub(message: Message):
