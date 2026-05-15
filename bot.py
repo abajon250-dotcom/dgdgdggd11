@@ -12,7 +12,7 @@ from typing import List, Dict, Any, Optional, Tuple
 
 from dotenv import load_dotenv
 from aiogram import Bot, Dispatcher, types
-from aiogram.filters import Command, StateFilter
+from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
@@ -20,7 +20,6 @@ from aiogram.types import (
     ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMarkup, InlineKeyboardButton,
     Message, CallbackQuery
 )
-from aiogram.utils.markdown import hbold
 from vk_api import VkApi
 from vk_api.exceptions import ApiError
 from requests.adapters import HTTPAdapter
@@ -56,7 +55,6 @@ if not BOT_TOKEN:
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Отключаем проверку SSL
 class SSLDisabledHTTPAdapter(HTTPAdapter):
     def init_poolmanager(self, *args, **kwargs):
         kwargs['ssl_context'] = ssl._create_unverified_context()
@@ -357,18 +355,16 @@ async def check_channel(user_id: int) -> bool:
     except:
         return False
 
-def main_keyboard(uid):
-    # Reply клавиатура – обычные эмодзи (кастомные не поддерживаются)
-    kb = ReplyKeyboardMarkup(resize_keyboard=True, row_width=2)
-    kb.add(KeyboardButton(text="📨 Начать рассылку"))
-    kb.add(KeyboardButton(text="📝 Мои шаблоны"))
-    kb.add(KeyboardButton(text="👤 Мой профиль"))
-    kb.add(KeyboardButton(text="📊 Моя статистика"))
-    kb.add(KeyboardButton(text="💰 Купить подписку"))
-    kb.add(KeyboardButton(text="🔑 Ввести токен VK"))
+# ---------------------- Reply клавиатура (главное меню) ----------------------
+def get_main_keyboard(uid: int) -> ReplyKeyboardMarkup:
+    buttons = [
+        [KeyboardButton(text="📨 Начать рассылку"), KeyboardButton(text="📝 Мои шаблоны")],
+        [KeyboardButton(text="👤 Мой профиль"), KeyboardButton(text="📊 Моя статистика")],
+        [KeyboardButton(text="💰 Купить подписку"), KeyboardButton(text="🔑 Ввести токен VK")]
+    ]
     if uid in ADMIN_IDS:
-        kb.add(KeyboardButton(text="👑 Админ-панель"))
-    return kb
+        buttons.append([KeyboardButton(text="👑 Админ-панель")])
+    return ReplyKeyboardMarkup(keyboard=buttons, resize_keyboard=True)
 
 # ===================== ОБРАБОТЧИКИ =====================
 @dp.message(Command("start"))
@@ -390,10 +386,10 @@ async def cmd_start(message: Message, state: FSMContext):
         "⚡️ Для получения токена VK используйте: https://vkhost.github.io\n\n"
         "🔹 <b>Админ:</b> @admin_username"
     )
-    await message.answer(welcome_text, parse_mode="HTML", reply_markup=main_keyboard(uid))
+    await message.answer(welcome_text, parse_mode="HTML", reply_markup=get_main_keyboard(uid))
     token = await get_vk_token(uid)
     if token:
-        await message.answer("✅ Ваш токен VK уже сохранён. Можете сразу начинать рассылку.", reply_markup=main_keyboard(uid))
+        await message.answer("✅ Ваш токен VK уже сохранён. Можете сразу начинать рассылку.", reply_markup=get_main_keyboard(uid))
 
 @dp.message(lambda msg: msg.text == "🔑 Ввести токен VK")
 async def enter_vk_token(message: Message, state: FSMContext):
@@ -434,7 +430,7 @@ async def process_vk_token(message: Message, state: FSMContext):
         f"   ┗ Личные: {stats['contacts']}\n\n"
         f"Теперь можно начинать рассылку через кнопку <b>📨 Начать рассылку</b>"
     )
-    await message.answer(info_text, parse_mode="HTML")
+    await message.answer(info_text, parse_mode="HTML", reply_markup=get_main_keyboard(message.from_user.id))
     await state.clear()
 
 @dp.message(lambda msg: msg.text == "💰 Купить подписку")
@@ -445,15 +441,7 @@ async def buy_subscription_menu(message: Message, state: FSMContext):
         return
     kb = InlineKeyboardMarkup(inline_keyboard=[])
     for days, price in SUBSCRIPTION_PLANS.items():
-        # Используем кастомное эмодзи для оплаты и синюю кнопку (primary)
-        kb.inline_keyboard.append([
-            InlineKeyboardButton(
-                text=f"{days} дней - {price} USDT",
-                callback_data=f"sub_{days}_{price}",
-                icon_custom_emoji_id="5195058841988914267",  # ваше эмодзи оплаты
-                style="primary"  # синяя кнопка
-            )
-        ])
+        kb.inline_keyboard.append([InlineKeyboardButton(text=f"📆 {days} дней - {price} USDT", callback_data=f"sub_{days}_{price}")])
     await message.answer("<tg-emoji emoji-id='5195058841988914267'></tg-emoji> <b>Выберите срок подписки</b>\n\nПосле оплаты подписка активируется автоматически.", parse_mode="HTML", reply_markup=kb)
 
 @dp.callback_query(lambda c: c.data and c.data.startswith("sub_"))
@@ -466,8 +454,8 @@ async def process_subscription_choice(callback: CallbackQuery):
         await callback.answer("❌ Ошибка создания счёта. Попробуйте позже.", show_alert=True)
         return
     kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="💸 Оплатить", url=pay_url, style="success")],
-        [InlineKeyboardButton(text="🔄 Проверить оплату", callback_data="check_payment", style="primary")]
+        [InlineKeyboardButton(text="💸 Оплатить", url=pay_url)],
+        [InlineKeyboardButton(text="🔄 Проверить оплату", callback_data="check_payment")]
     ])
     await callback.message.edit_text(
         f"<tg-emoji emoji-id='5195058841988914267'></tg-emoji> <b>Оплата подписки на {days} дней</b>\n\n"
@@ -534,8 +522,8 @@ async def proceed_to_load_recipients(message: Message, state: FSMContext):
     templates = await get_templates(message.from_user.id)
     if templates:
         kb = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="📝 Выбрать шаблон", callback_data="use_template", style="primary")],
-            [InlineKeyboardButton(text="✏️ Ввести текст вручную", callback_data="manual_text", style="default")]
+            [InlineKeyboardButton(text="📝 Выбрать шаблон", callback_data="use_template")],
+            [InlineKeyboardButton(text="✏️ Ввести текст вручную", callback_data="manual_text")]
         ])
         await message.answer("Выберите способ ввода текста:", reply_markup=kb)
     else:
@@ -553,13 +541,7 @@ async def use_template_callback(callback: CallbackQuery, state: FSMContext):
         return
     kb = InlineKeyboardMarkup(inline_keyboard=[])
     for tpl in templates:
-        kb.inline_keyboard.append([
-            InlineKeyboardButton(
-                text=f"📄 {tpl['name']} (задержка {tpl['delay']} с)",
-                callback_data=f"tpl_{tpl['id']}",
-                style="default"
-            )
-        ])
+        kb.inline_keyboard.append([InlineKeyboardButton(text=f"📄 {tpl['name']} (задержка {tpl['delay']} с)", callback_data=f"tpl_{tpl['id']}")])
     await callback.message.answer("📋 <b>Выберите шаблон</b>", parse_mode="HTML", reply_markup=kb)
 
 @dp.callback_query(lambda c: c.data and c.data.startswith("tpl_"))
@@ -624,17 +606,15 @@ async def templates_menu(message: Message, state: FSMContext):
     uid = message.from_user.id
     templates = await get_templates(uid)
     if not templates:
-        kb = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="➕ Создать шаблон", callback_data="create_template", style="primary")]
-        ])
+        kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="➕ Создать шаблон", callback_data="create_template")]])
         await message.answer("📭 У вас пока нет шаблонов. Создайте первый!", reply_markup=kb)
         return
     text = "📋 <b>Ваши шаблоны:</b>\n\n"
     for t in templates:
         text += f"🔹 <b>{t['name']}</b> - <code>{t['content'][:50]}...</code> (⏱️ задержка: {t['delay']} с)\n"
     kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="➕ Создать", callback_data="create_template", style="success")],
-        [InlineKeyboardButton(text="❌ Удалить", callback_data="delete_template", style="danger")]
+        [InlineKeyboardButton(text="➕ Создать", callback_data="create_template")],
+        [InlineKeyboardButton(text="❌ Удалить", callback_data="delete_template")]
     ])
     await message.answer(text, parse_mode="HTML", reply_markup=kb)
 
@@ -690,9 +670,7 @@ async def delete_template_callback(callback: CallbackQuery):
         return
     kb = InlineKeyboardMarkup(inline_keyboard=[])
     for t in templates:
-        kb.inline_keyboard.append([
-            InlineKeyboardButton(text=f"❌ {t['name']}", callback_data=f"del_tpl_{t['id']}", style="danger")
-        ])
+        kb.inline_keyboard.append([InlineKeyboardButton(text=f"❌ {t['name']}", callback_data=f"del_tpl_{t['id']}")])
     await callback.message.answer("🗑️ Выберите шаблон для удаления:", reply_markup=kb)
 
 @dp.callback_query(lambda c: c.data and c.data.startswith("del_tpl_"))
@@ -744,11 +722,11 @@ async def user_stats(message: Message, state: FSMContext):
 async def admin_panel(message: Message, state: FSMContext):
     await state.clear()
     kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="📊 Статистика бота", callback_data="admin_stats", style="primary")],
-        [InlineKeyboardButton(text="📨 Рассылка пользователям", callback_data="admin_broadcast", style="primary")],
-        [InlineKeyboardButton(text="🎁 Выдать подписку", callback_data="admin_give_sub", style="success")],
-        [InlineKeyboardButton(text="📈 Статистика проливов", callback_data="admin_mailing_stats", style="default")],
-        [InlineKeyboardButton(text="🔙 Закрыть", callback_data="admin_close", style="danger")]
+        [InlineKeyboardButton(text="📊 Статистика бота", callback_data="admin_stats")],
+        [InlineKeyboardButton(text="📨 Рассылка пользователям", callback_data="admin_broadcast")],
+        [InlineKeyboardButton(text="🎁 Выдать подписку", callback_data="admin_give_sub")],
+        [InlineKeyboardButton(text="📈 Статистика проливов", callback_data="admin_mailing_stats")],
+        [InlineKeyboardButton(text="🔙 Закрыть", callback_data="admin_close")]
     ])
     await message.answer("👑 <b>Админ-панель</b>\nВыберите действие:", reply_markup=kb, parse_mode="HTML")
 
