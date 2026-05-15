@@ -57,9 +57,10 @@ bot = Bot(token=BOT_TOKEN)
 storage = MemoryStorage()
 dp = Dispatcher(storage=storage)
 
+# ===================== ПЛАНЫ ПОДПИСКИ =====================
 SUBSCRIPTION_PLANS = {3: 1.0, 7: 2.0, 30: 5.0, 90: 12.0}
 
-# ---------------------- VK функции (без изменений) ----------------------
+# ===================== ФУНКЦИИ VK =====================
 def create_vk_session(token: str):
     session = requests.Session()
     session.mount('https://', SSLDisabledHTTPAdapter())
@@ -213,7 +214,7 @@ def make_progress_bar(percent: float, length: int = 10) -> str:
     filled = int(length * percent / 100)
     return "🤖" * filled + "⚙️" * (length - filled)
 
-# ---------------------- CryptoBot ----------------------
+# ===================== CRYPTOBOT INVOICE =====================
 async def create_crypto_invoice(user_id: int, days: int, amount: float) -> Optional[str]:
     if not CRYPTOBOT_TOKEN:
         return None
@@ -260,9 +261,9 @@ async def check_payment(user_id: int) -> bool:
     except:
         return False
 
-# ---------------------- Задача рассылки ----------------------
+# ===================== ЗАДАЧА РАССЫЛКИ =====================
 async def mailing_task(vk_token: str, recipients: List[Dict], text: str, delay: float,
-                       chat_id: int, user_info: Dict, stats: Dict, user_telegram_id: int):
+                       chat_id: int, user_info: Dict, stats: Dict, user_telegram_id: int, message_id: int = None):
     vk_session = create_vk_session(vk_token)
     vk = vk_session.get_api()
     total = len(recipients)
@@ -270,6 +271,8 @@ async def mailing_task(vk_token: str, recipients: List[Dict], text: str, delay: 
     sent_err = 0
     start_time = time.time()
     last_update = start_time
+    if message_id:
+        await bot.delete_message(chat_id, message_id)
     progress_msg = await bot.send_message(chat_id, "⏳ Запуск рассылки...")
     for idx, rec in enumerate(recipients, 1):
         success = await asyncio.to_thread(send_vk_message, vk, rec["peer_id"], text)
@@ -316,7 +319,7 @@ async def mailing_task(vk_token: str, recipients: List[Dict], text: str, delay: 
     vk_name = f"{user_info.get('first_name')} {user_info.get('last_name')}".strip()
     await save_mailing_stats(user_telegram_id, total, sent_ok, sent_err, total_time, text[:200], vk_name)
 
-# ---------------------- FSM состояния ----------------------
+# ===================== СОСТОЯНИЯ FSM =====================
 class BotStates(StatesGroup):
     waiting_vk_token = State()
     waiting_group_name = State()
@@ -329,6 +332,7 @@ class BotStates(StatesGroup):
     admin_waiting_user_id = State()
     admin_waiting_days = State()
 
+# ===================== ПРОВЕРКА ПОДПИСКИ =====================
 async def check_subscription(user_id: int) -> bool:
     if user_id in ADMIN_IDS:
         return True
@@ -346,7 +350,7 @@ async def check_channel(user_id: int) -> bool:
     except:
         return False
 
-# ---------------------- Клавиатуры ----------------------
+# ===================== ГЛАВНОЕ МЕНЮ (ИНЛАЙН) =====================
 def main_menu(uid: int) -> InlineKeyboardMarkup:
     buttons = [
         [InlineKeyboardButton(text="📨 Начать рассылку", callback_data="start_mailing", icon_custom_emoji_id="5472096095280572227", style="primary")],
@@ -357,13 +361,10 @@ def main_menu(uid: int) -> InlineKeyboardMarkup:
         [InlineKeyboardButton(text="🔑 Ввести токен VK", callback_data="enter_token", icon_custom_emoji_id="5472096095280572227", style="primary")]
     ]
     if uid in ADMIN_IDS:
-        buttons.append([InlineKeyboardButton(text="👑 Админ-панель", callback_data="admin_panel", icon_custom_emoji_id="5195058841988914267", style="danger")])
+        buttons.append([InlineKeyboardButton(text="👑 Админ-панель", callback_data="admin_panel", style="danger")])
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
-def back_button(callback_data: str) -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="◀️ Назад", callback_data=callback_data, style="default")]])
-
-# ---------------------- Обработчики ----------------------
+# ===================== ОБРАБОТЧИКИ =====================
 @dp.message(Command("start"))
 async def cmd_start(message: Message, state: FSMContext):
     await state.clear()
@@ -374,7 +375,7 @@ async def cmd_start(message: Message, state: FSMContext):
         return
     welcome_text = (
         "<tg-emoji emoji-id='5278611606756942667'></tg-emoji> <b>Добро пожаловать в VK Рассыльщик!</b>\n\n"
-        "🤖 Я помогу вам отправлять сообщения в личные диалоги и беседы ВКонтакте.\n\n"
+        "🤖 Я помогу вам отправлять быстро рассыл и качественно.\n\n"
         "📌 <b>Что нужно сделать:</b>\n"
         "1️⃣ Пополнить баланс через кнопку <b>💰 Купить подписку</b>\n"
         "2️⃣ Ввести токен ВК через кнопку <b>🔑 Ввести токен VK</b>\n"
@@ -383,20 +384,12 @@ async def cmd_start(message: Message, state: FSMContext):
         "⚡️ Для получения токена VK используйте: https://vkhost.github.io"
     )
     await message.answer(welcome_text, parse_mode="HTML", reply_markup=main_menu(uid))
-    token = await get_vk_token(uid)
-    if token:
-        await message.answer("✅ Ваш токен VK уже сохранён. Можете сразу начинать рассылку.", reply_markup=main_menu(uid))
 
-# ---- Ввод токена VK ----
+# ---- Ввести токен VK ----
 @dp.callback_query(lambda c: c.data == "enter_token")
 async def enter_vk_token(callback: CallbackQuery, state: FSMContext):
     await callback.answer()
-    await callback.message.edit_text(
-        "🔑 Отправьте <b>токен доступа VK</b> (сообщества или пользователя).\n\n"
-        "Токен должен иметь право на отправку сообщений (scope: messages).\n"
-        "Получить токен можно здесь: https://vkhost.github.io",
-        parse_mode="HTML", reply_markup=back_button("main_menu")
-    )
+    await callback.message.edit_text("🔑 Отправьте <b>токен доступа VK</b> (сообщества или пользователя).\n\nТокен должен иметь право на отправку сообщений (scope: messages).\nПолучить токен можно здесь: https://vkhost.github.io", parse_mode="HTML", reply_markup=None)
     await state.set_state(BotStates.waiting_vk_token)
 
 @dp.message(BotStates.waiting_vk_token)
@@ -433,21 +426,18 @@ async def process_vk_token(message: Message, state: FSMContext):
     await message.answer(info_text, parse_mode="HTML", reply_markup=main_menu(message.from_user.id))
     await state.clear()
 
-# ---- Покупка подписки ----
+# ---- Купить подписку ----
 @dp.callback_query(lambda c: c.data == "buy_sub")
 async def buy_subscription_menu(callback: CallbackQuery, state: FSMContext):
     await callback.answer()
     if not CRYPTOBOT_TOKEN:
-        await callback.message.edit_text("⚠️ Оплата через CryptoBot недоступна. Обратитесь к администратору.", reply_markup=back_button("main_menu"))
+        await callback.message.edit_text("⚠️ Оплата через CryptoBot недоступна. Обратитесь к администратору.", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="◀️ Назад", callback_data="back_to_main")]]))
         return
     kb = InlineKeyboardMarkup(inline_keyboard=[])
     for days, price in SUBSCRIPTION_PLANS.items():
         kb.inline_keyboard.append([InlineKeyboardButton(text=f"📆 {days} дней - {price} USDT", callback_data=f"sub_{days}_{price}", icon_custom_emoji_id="5195058841988914267", style="primary")])
-    kb.inline_keyboard.append([InlineKeyboardButton(text="◀️ Назад", callback_data="main_menu", style="default")])
-    await callback.message.edit_text(
-        "<tg-emoji emoji-id='5195058841988914267'></tg-emoji> <b>Выберите срок подписки</b>\n\nПосле оплаты подписка активируется автоматически.",
-        parse_mode="HTML", reply_markup=kb
-    )
+    kb.inline_keyboard.append([InlineKeyboardButton(text="◀️ Назад", callback_data="back_to_main", style="default")])
+    await callback.message.edit_text("<tg-emoji emoji-id='5195058841988914267'></tg-emoji> <b>Выберите срок подписки</b>\n\nПосле оплаты подписка активируется автоматически.", parse_mode="HTML", reply_markup=kb)
 
 @dp.callback_query(lambda c: c.data and c.data.startswith("sub_"))
 async def process_subscription_choice(callback: CallbackQuery):
@@ -477,7 +467,7 @@ async def check_payment_callback(callback: CallbackQuery):
     paid = await check_payment(callback.from_user.id)
     if paid:
         await callback.answer("✅ Оплата получена! Подписка активирована.", show_alert=True)
-        await callback.message.edit_text("✅ Подписка успешно активирована!", reply_markup=back_button("main_menu"))
+        await callback.message.edit_text("✅ Подписка успешно активирована!", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="◀️ Назад", callback_data="back_to_main")]]))
     else:
         await callback.answer("⏳ Оплата ещё не получена. Попробуйте позже.", show_alert=True)
 
@@ -486,31 +476,15 @@ async def check_payment_callback(callback: CallbackQuery):
 async def start_newsletter_button(callback: CallbackQuery, state: FSMContext):
     await callback.answer()
     if not await check_subscription(callback.from_user.id):
-        await callback.message.edit_text(
-            "<tg-emoji emoji-id='5278578973595427038'></tg-emoji> У вас нет активной подписки. Купите её через кнопку <b>💰 Купить подписку</b>.",
-            parse_mode="HTML", reply_markup=back_button("main_menu")
-        )
+        await callback.message.edit_text("<tg-emoji emoji-id='5278578973595427038'></tg-emoji> У вас нет активной подписки. Купите её через кнопку <b>💰 Купить подписку</b>.", parse_mode="HTML", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="◀️ Назад", callback_data="back_to_main")]]))
         return
     token = await get_vk_token(callback.from_user.id)
     if not token:
-        await callback.message.edit_text(
-            "❌ Сначала введите токен VK через кнопку <b>🔑 Ввести токен VK</b>.",
-            parse_mode="HTML", reply_markup=back_button("main_menu")
-        )
+        await callback.message.edit_text("❌ Сначала введите токен VK через кнопку <b>🔑 Ввести токен VK</b>.", parse_mode="HTML", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="◀️ Назад", callback_data="back_to_main")]]))
         return
-    await callback.message.edit_text(
-        "📌 Если хотите отправить только в беседы с определённым названием, введите его.\n"
-        "Если нужно отправить во все диалоги, просто напишите <b>пропустить</b> или нажмите /skip.\n\n"
-        "Для отмены нажмите /cancel",
-        parse_mode="HTML", reply_markup=back_button("main_menu")
-    )
+    await callback.message.edit_text("📌 Если хотите отправить только в беседы с определённым названием, введите его.\nЕсли нужно отправить во все диалоги, просто напишите <b>пропустить</b> или нажмите /skip.", parse_mode="HTML", reply_markup=None)
     await state.set_state(BotStates.waiting_group_name)
     await state.update_data(vk_token=token)
-
-@dp.message(Command("cancel"), StateFilter(BotStates.waiting_group_name, BotStates.waiting_newsletter_text, BotStates.waiting_delay))
-async def cancel_input(message: Message, state: FSMContext):
-    await state.clear()
-    await message.answer("❌ Ввод отменён. Возврат в главное меню.", reply_markup=main_menu(message.from_user.id))
 
 @dp.message(Command("skip"), StateFilter(BotStates.waiting_group_name))
 async def skip_group_filter(message: Message, state: FSMContext):
@@ -529,32 +503,27 @@ async def proceed_to_load_recipients(message: Message, state: FSMContext):
     data = await state.get_data()
     token = data.get("vk_token")
     group_filter = data.get("group_filter")
-    processing_msg = await message.answer("🔄 Загружаю диалоги...")
+    await message.answer("🔄 Загружаю диалоги...")
     try:
         user_info = await asyncio.to_thread(get_vk_user_info, token)
         recipients, stats = await asyncio.to_thread(get_recipients, token, group_filter)
     except Exception as e:
-        await processing_msg.delete()
-        await message.answer(f"❌ Ошибка загрузки диалогов: {e}", reply_markup=main_menu(message.from_user.id))
-        await state.clear()
+        await message.answer(f"❌ Ошибка загрузки диалогов: {e}")
         return
     if not recipients:
-        await processing_msg.delete()
-        await message.answer("⚠️ Нет диалогов, соответствующих критериям. Попробуйте изменить фильтр.", reply_markup=main_menu(message.from_user.id))
-        await state.clear()
+        await message.answer("⚠️ Нет диалогов, соответствующих критериям. Попробуйте изменить фильтр.")
         return
     await state.update_data(recipients=recipients, user_info=user_info, stats=stats)
-    await processing_msg.delete()
     templates = await get_templates(message.from_user.id)
     if templates:
         kb = InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="📝 Выбрать шаблон", callback_data="use_template", icon_custom_emoji_id="5275979556308674886", style="primary")],
             [InlineKeyboardButton(text="✏️ Ввести текст вручную", callback_data="manual_text", style="default")],
-            [InlineKeyboardButton(text="◀️ Назад", callback_data="main_menu", style="default")]
+            [InlineKeyboardButton(text="◀️ Назад", callback_data="back_to_main", style="default")]
         ])
         await message.answer("Выберите способ ввода текста:", reply_markup=kb)
     else:
-        await message.answer("✏️ Введите текст сообщения для рассылки (можно использовать HTML):\n\nДля отмены нажмите /cancel")
+        await message.answer("✏️ Введите текст сообщения для рассылки (можно использовать HTML):", reply_markup=None)
         await state.set_state(BotStates.waiting_newsletter_text)
 
 @dp.callback_query(lambda c: c.data == "use_template")
@@ -563,7 +532,8 @@ async def use_template_callback(callback: CallbackQuery, state: FSMContext):
     uid = callback.from_user.id
     templates = await get_templates(uid)
     if not templates:
-        await callback.message.edit_text("📭 У вас нет шаблонов. Сначала создайте их через раздел «Мои шаблоны».", reply_markup=back_button("main_menu"))
+        await callback.message.edit_text("📭 У вас нет шаблонов. Сначала создайте их через раздел «Мои шаблоны».", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="◀️ Назад", callback_data="back_to_main")]]))
+        await state.set_state(BotStates.waiting_newsletter_text)
         return
     kb = InlineKeyboardMarkup(inline_keyboard=[])
     for tpl in templates:
@@ -581,12 +551,12 @@ async def apply_template_callback(callback: CallbackQuery, state: FSMContext):
         return
     await callback.answer()
     await state.update_data(newsletter_text=tpl["content"], delay=tpl["delay"])
-    await start_mailing_with_data(callback.message, state, callback.from_user.id)
+    await start_mailing_with_data(callback.message, state, callback)
 
 @dp.callback_query(lambda c: c.data == "manual_text")
 async def manual_text_callback(callback: CallbackQuery, state: FSMContext):
     await callback.answer()
-    await callback.message.edit_text("✏️ Введите текст сообщения для рассылки (можно использовать HTML):\n\nДля отмены нажмите /cancel")
+    await callback.message.edit_text("✏️ Введите текст сообщения для рассылки (можно использовать HTML):", reply_markup=None)
     await state.set_state(BotStates.waiting_newsletter_text)
 
 @dp.message(BotStates.waiting_newsletter_text)
@@ -594,9 +564,9 @@ async def process_newsletter_text(message: Message, state: FSMContext):
     await state.update_data(newsletter_text=message.text)
     data = await state.get_data()
     if "delay" in data:
-        await start_mailing_with_data(message, state, message.from_user.id)
+        await start_mailing_with_data(message, state)
     else:
-        await message.answer("⏱ Введите задержку в секундах (например, 3):\n\nДля отмены нажмите /cancel")
+        await message.answer("⏱ Введите задержку в секундах (например, 3):", reply_markup=None)
         await state.set_state(BotStates.waiting_delay)
 
 @dp.message(BotStates.waiting_delay)
@@ -606,12 +576,12 @@ async def process_delay(message: Message, state: FSMContext):
         if delay < 0:
             raise ValueError
     except:
-        await message.answer("❌ Введите положительное число секунд. Для отмены /cancel")
+        await message.answer("❌ Введите положительное число секунд.")
         return
     await state.update_data(delay=delay)
-    await start_mailing_with_data(message, state, message.from_user.id)
+    await start_mailing_with_data(message, state)
 
-async def start_mailing_with_data(target: Message, state: FSMContext, user_id: int):
+async def start_mailing_with_data(message: Message, state: FSMContext, callback: CallbackQuery = None):
     data = await state.get_data()
     token = data.get("vk_token")
     recipients = data.get("recipients")
@@ -620,57 +590,59 @@ async def start_mailing_with_data(target: Message, state: FSMContext, user_id: i
     user_info = data.get("user_info")
     stats = data.get("stats")
     if not all([token, recipients, text, user_info, stats]):
-        await target.answer("❌ Ошибка данных. Начните заново через кнопки меню.", reply_markup=main_menu(user_id))
+        await message.answer("❌ Ошибка данных. Начните заново через кнопки меню.", reply_markup=main_menu(message.from_user.id))
         await state.clear()
         return
-    asyncio.create_task(mailing_task(token, recipients, text, delay, target.chat.id, user_info, stats, user_id))
-    await target.answer("🚀 Рассылка запущена! Прогресс будет здесь.")
+    if callback:
+        await callback.message.delete()
+    asyncio.create_task(mailing_task(token, recipients, text, delay, message.chat.id, user_info, stats, message.from_user.id, getattr(message, 'message_id', None)))
+    await message.answer("🚀 Рассылка запущена! Прогресс будет здесь.")
     await state.clear()
 
-# ---- Мои шаблоны (список, создание, удаление) ----
+# ---- Мои шаблоны (главное меню) ----
 @dp.callback_query(lambda c: c.data == "my_templates")
-async def templates_menu(callback: CallbackQuery):
+async def templates_menu(callback: CallbackQuery, state: FSMContext):
     await callback.answer()
     uid = callback.from_user.id
     templates = await get_templates(uid)
     if not templates:
         kb = InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="➕ Создать шаблон", callback_data="create_template", style="primary")],
-            [InlineKeyboardButton(text="◀️ Назад", callback_data="main_menu", style="default")]
+            [InlineKeyboardButton(text="◀️ Назад", callback_data="back_to_main", style="default")]
         ])
         await callback.message.edit_text("📭 У вас пока нет шаблонов. Создайте первый!", reply_markup=kb)
         return
-    text = "📋 <b>Ваши шаблоны:</b>\n\n"
+    text = "<tg-emoji emoji-id='5275979556308674886'></tg-emoji> <b>Ваши шаблоны</b>\n\n"
     for t in templates:
         text += f"🔹 <b>{t['name']}</b> - <code>{t['content'][:50]}...</code> (⏱️ задержка: {t['delay']} с)\n"
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="➕ Создать", callback_data="create_template", style="success")],
         [InlineKeyboardButton(text="❌ Удалить", callback_data="delete_template", style="danger")],
-        [InlineKeyboardButton(text="◀️ Назад", callback_data="main_menu", style="default")]
+        [InlineKeyboardButton(text="◀️ Назад", callback_data="back_to_main", style="default")]
     ])
     await callback.message.edit_text(text, parse_mode="HTML", reply_markup=kb)
 
 @dp.callback_query(lambda c: c.data == "create_template")
 async def create_template_callback(callback: CallbackQuery, state: FSMContext):
     await callback.answer()
-    await callback.message.edit_text("📝 Введите <b>название</b> шаблона:\n\nДля отмены нажмите /cancel", parse_mode="HTML")
+    await callback.message.edit_text("📝 Введите <b>название</b> шаблона:", parse_mode="HTML", reply_markup=None)
     await state.set_state(BotStates.waiting_template_name)
 
 @dp.message(BotStates.waiting_template_name)
 async def process_template_name(message: Message, state: FSMContext):
     name = message.text.strip()
     if not name:
-        await message.answer("❌ Название не может быть пустым. Попробуйте снова или /cancel")
+        await message.answer("❌ Название не может быть пустым.")
         return
     await state.update_data(template_name=name)
-    await message.answer("✏️ Теперь введите <b>текст</b> шаблона (можно использовать HTML):\n\nДля отмены /cancel", parse_mode="HTML")
+    await message.answer("✏️ Теперь введите <b>текст</b> шаблона (можно использовать HTML):", parse_mode="HTML", reply_markup=None)
     await state.set_state(BotStates.waiting_template_content)
 
 @dp.message(BotStates.waiting_template_content)
 async def process_template_content(message: Message, state: FSMContext):
     content = message.text
     await state.update_data(template_content=content)
-    await message.answer("⏱️ Введите <b>задержку</b> для этого шаблона (в секундах, например 3):\n\nДля отмены /cancel", parse_mode="HTML")
+    await message.answer("⏱️ Введите <b>задержку</b> для этого шаблона (в секундах, например 3):", parse_mode="HTML", reply_markup=None)
     await state.set_state(BotStates.waiting_template_delay)
 
 @dp.message(BotStates.waiting_template_delay)
@@ -680,19 +652,18 @@ async def process_template_delay(message: Message, state: FSMContext):
         if delay < 0:
             raise ValueError
     except:
-        await message.answer("❌ Введите положительное число секунд. Для отмены /cancel")
+        await message.answer("❌ Введите положительное число секунд.")
         return
     data = await state.get_data()
     name = data.get("template_name")
     content = data.get("template_content")
     if not name or not content:
         await state.clear()
-        await message.answer("❌ Ошибка, начните заново.", reply_markup=main_menu(message.from_user.id))
+        await message.answer("❌ Ошибка, начните заново.")
         return
     await save_template(message.from_user.id, name, content, delay)
-    await message.answer(f"✅ Шаблон <b>{name}</b> сохранён с задержкой {delay} с!", parse_mode="HTML")
+    await message.answer(f"✅ Шаблон <b>{name}</b> сохранён с задержкой {delay} с!", parse_mode="HTML", reply_markup=main_menu(message.from_user.id))
     await state.clear()
-    await message.answer("Главное меню:", reply_markup=main_menu(message.from_user.id))
 
 @dp.callback_query(lambda c: c.data == "delete_template")
 async def delete_template_callback(callback: CallbackQuery):
@@ -712,17 +683,17 @@ async def confirm_delete_template(callback: CallbackQuery):
     tpl_id = int(callback.data.split("_")[2])
     await delete_template(tpl_id, callback.from_user.id)
     await callback.answer("✅ Шаблон удалён", show_alert=True)
-    # Обновляем меню шаблонов
-    await templates_menu(callback)
+    await callback.message.edit_text("✅ Шаблон удалён.", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="◀️ Назад", callback_data="my_templates")]]))
+    await callback.message.answer("Главное меню:", reply_markup=main_menu(callback.from_user.id))
 
 # ---- Мой профиль ----
 @dp.callback_query(lambda c: c.data == "my_profile")
-async def show_profile(callback: CallbackQuery):
+async def show_profile(callback: CallbackQuery, state: FSMContext):
     await callback.answer()
     uid = callback.from_user.id
     user = await get_user(uid)
     if not user:
-        await callback.message.edit_text("❌ Ошибка: не найден в базе.", reply_markup=back_button("main_menu"))
+        await callback.message.edit_text("❌ Ошибка: не найден в базе.", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="◀️ Назад", callback_data="back_to_main")]]))
         return
     sub = user.get('subscription_until')
     sub_text = sub.strftime('%d.%m.%Y %H:%M') if sub else "Нет"
@@ -735,25 +706,27 @@ async def show_profile(callback: CallbackQuery):
         f"🔖 Username: @{user.get('username') or 'Нет'}\n"
         f"📅 Регистрация: {user.get('joined_at').strftime('%d.%m.%Y %H:%M') if user.get('joined_at') else 'Неизвестно'}\n"
         f"⏳ Подписка до: {sub_text}\n\n"
-        f"<tg-emoji emoji-id='5472096095280572227'></tg-emoji> Сменить токен можно через кнопку «Ввести токен VK»"
+        f"<tg-emoji emoji-id='5472096095280572227'></tg-emoji> »"
     )
-    await callback.message.edit_text(text, parse_mode="HTML", reply_markup=back_button("main_menu"))
+    kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="◀️ Назад", callback_data="back_to_main", style="default")]])
+    await callback.message.edit_text(text, parse_mode="HTML", reply_markup=kb)
 
 # ---- Моя статистика ----
 @dp.callback_query(lambda c: c.data == "my_stats")
-async def user_stats(callback: CallbackQuery):
+async def user_stats(callback: CallbackQuery, state: FSMContext):
     await callback.answer()
     uid = callback.from_user.id
     stats = await get_user_mailing_stats(uid, 10)
     if not stats:
-        await callback.message.edit_text("📭 У вас ещё нет завершённых рассылок.", reply_markup=back_button("main_menu"))
+        await callback.message.edit_text("📭 У вас ещё нет завершённых рассылок.", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="◀️ Назад", callback_data="back_to_main")]]))
         return
     text = "<tg-emoji emoji-id='5278753302023004775'></tg-emoji> <b>Ваши последние 10 рассылок</b>\n\n"
     for s in stats:
         text += f"🗓 {s['started_at'].strftime('%Y-%m-%d %H:%M')}\n"
         text += f"👤 VK: {s['vk_account_name']}\n"
         text += f"📊 Всего: {s['total_recipients']} | <tg-emoji emoji-id='5206401524200145033'></tg-emoji>{s['sent_success']} <tg-emoji emoji-id='5206510891247371052'></tg-emoji>{s['sent_error']} | ⏱{s['total_time_seconds']:.1f}с\n\n"
-    await callback.message.edit_text(text[:4000], parse_mode="HTML", reply_markup=back_button("main_menu"))
+    kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="◀️ Назад", callback_data="back_to_main", style="default")]])
+    await callback.message.edit_text(text[:4000], parse_mode="HTML", reply_markup=kb)
 
 # ---- Админ-панель ----
 @dp.callback_query(lambda c: c.data == "admin_panel" and c.from_user.id in ADMIN_IDS)
@@ -764,32 +737,38 @@ async def admin_panel(callback: CallbackQuery, state: FSMContext):
         [InlineKeyboardButton(text="📨 Рассылка пользователям", callback_data="admin_broadcast", style="primary")],
         [InlineKeyboardButton(text="🎁 Выдать подписку", callback_data="admin_give_sub", style="success")],
         [InlineKeyboardButton(text="📈 Статистика проливов", callback_data="admin_mailing_stats", style="default")],
-        [InlineKeyboardButton(text="◀️ Назад", callback_data="main_menu", style="default")]
+        [InlineKeyboardButton(text="◀️ Назад", callback_data="back_to_main", style="danger")]
     ])
-    await callback.message.edit_text("👑 <b>Админ-панель</b>\nВыберите действие:", reply_markup=kb, parse_mode="HTML")
+    await callback.message.edit_text("👑 <b>Админ-панель</b>\nВыберите действие:", parse_mode="HTML", reply_markup=kb)
 
-@dp.callback_query(lambda c: c.data == "admin_stats")
-async def admin_stats_callback(callback: CallbackQuery):
-    stats = await get_bot_stats()
-    text = f"📊 <b>Статистика бота</b>\n👥 Пользователей: {stats['users']}\n🚀 Проливов: {stats['mailings']}\n✉️ Отправлено: {stats['sent']}\n❌ Ошибок: {stats['errors']}"
-    await callback.message.edit_text(text, parse_mode="HTML", reply_markup=back_button("admin_panel"))
-
-@dp.callback_query(lambda c: c.data == "admin_mailing_stats")
-async def admin_mailing_stats_callback(callback: CallbackQuery):
-    mailings = await get_mailing_stats(20)
-    if not mailings:
-        await callback.message.edit_text("📭 История проливов пуста.", reply_markup=back_button("admin_panel"))
-        return
-    text = "📈 <b>Последние 20 проливов (всех пользователей):</b>\n"
-    for m in mailings:
-        text += f"🆔 ID {m['id']} | {m['started_at'].strftime('%Y-%m-%d %H:%M')} | {m['vk_account_name']} | Всего: {m['total_recipients']} | <tg-emoji emoji-id='5206401524200145033'></tg-emoji>{m['sent_success']} <tg-emoji emoji-id='5206510891247371052'></tg-emoji>{m['sent_error']} | ⏱️{m['total_time_seconds']:.1f}с\n"
-    await callback.message.edit_text(text[:4000], parse_mode="HTML", reply_markup=back_button("admin_panel"))
-
-@dp.callback_query(lambda c: c.data == "admin_broadcast")
-async def admin_broadcast(callback: CallbackQuery, state: FSMContext):
+@dp.callback_query(lambda c: c.data.startswith("admin_"))
+async def admin_callback(callback: CallbackQuery, state: FSMContext):
+    data = callback.data
     await callback.answer()
-    await callback.message.edit_text("✏️ Введите текст для рассылки ВСЕМ пользователям бота:\n\nДля отмены нажмите /cancel", reply_markup=back_button("admin_panel"))
-    await state.set_state(BotStates.admin_waiting_broadcast)
+    if data == "admin_stats":
+        stats = await get_bot_stats()
+        kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="◀️ Назад", callback_data="admin_panel", style="default")]])
+        await callback.message.edit_text(
+            f"📊 <b>Статистика бота</b>\n👥 Пользователей: {stats['users']}\n🚀 Проливов: {stats['mailings']}\n✉️ Отправлено: {stats['sent']}\n❌ Ошибок: {stats['errors']}",
+            parse_mode="HTML", reply_markup=kb
+        )
+    elif data == "admin_broadcast":
+        await callback.message.edit_text("✏️ Введите текст для рассылки ВСЕМ пользователям бота:", reply_markup=None)
+        await state.set_state(BotStates.admin_waiting_broadcast)
+    elif data == "admin_give_sub":
+        await callback.message.edit_text("🔢 Введите Telegram ID пользователя (число):", reply_markup=None)
+        await state.set_state(BotStates.admin_waiting_user_id)
+    elif data == "admin_mailing_stats":
+        mailings = await get_mailing_stats(20)
+        if not mailings:
+            kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="◀️ Назад", callback_data="admin_panel", style="default")]])
+            await callback.message.edit_text("📭 История проливов пуста.", reply_markup=kb)
+            return
+        text = "📈 <b>Последние 20 проливов (всех пользователей):</b>\n"
+        for m in mailings:
+            text += f"🆔 ID {m['id']} | {m['started_at'].strftime('%Y-%m-%d %H:%M')} | {m['vk_account_name']} | Всего: {m['total_recipients']} | <tg-emoji emoji-id='5206401524200145033'></tg-emoji>{m['sent_success']} <tg-emoji emoji-id='5206510891247371052'></tg-emoji>{m['sent_error']} | ⏱️{m['total_time_seconds']:.1f}с\n"
+        kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="◀️ Назад", callback_data="admin_panel", style="default")]])
+        await callback.message.edit_text(text[:4000], parse_mode="HTML", reply_markup=kb)
 
 @dp.message(BotStates.admin_waiting_broadcast)
 async def admin_broadcast_process(message: Message, state: FSMContext):
@@ -803,25 +782,18 @@ async def admin_broadcast_process(message: Message, state: FSMContext):
             await asyncio.sleep(0.05)
         except:
             pass
-    await message.answer(f"✅ Рассылка завершена. Отправлено {sent} из {len(users)} пользователей.")
+    await message.answer(f"✅ Рассылка завершена. Отправлено {sent} из {len(users)} пользователей.", reply_markup=main_menu(message.from_user.id))
     await state.clear()
-    await message.answer("Главное меню:", reply_markup=main_menu(message.from_user.id))
-
-@dp.callback_query(lambda c: c.data == "admin_give_sub")
-async def admin_give_sub(callback: CallbackQuery, state: FSMContext):
-    await callback.answer()
-    await callback.message.edit_text("🔢 Введите Telegram ID пользователя (число):\n\nДля отмены нажмите /cancel", reply_markup=back_button("admin_panel"))
-    await state.set_state(BotStates.admin_waiting_user_id)
 
 @dp.message(BotStates.admin_waiting_user_id)
 async def admin_get_user_id(message: Message, state: FSMContext):
     try:
         target = int(message.text.strip())
     except:
-        await message.answer("❌ ID должен быть числом. Попробуйте снова или /cancel")
+        await message.answer("❌ ID должен быть числом.")
         return
     await state.update_data(target_id=target)
-    await message.answer("📆 Введите количество дней (можно дробное, например 0.5 для 12 часов):\n\nДля отмены /cancel")
+    await message.answer("📆 Введите количество дней (можно дробное, например 0.5 для 12 часов):", reply_markup=None)
     await state.set_state(BotStates.admin_waiting_days)
 
 @dp.message(BotStates.admin_waiting_days)
@@ -831,25 +803,19 @@ async def admin_give_days(message: Message, state: FSMContext):
         if days <= 0:
             raise ValueError
     except:
-        await message.answer("❌ Введите положительное число (дни). Попробуйте снова или /cancel")
+        await message.answer("❌ Введите положительное число (дни).")
         return
     data = await state.get_data()
     target = data.get("target_id")
     await set_subscription(target, days)
-    await message.answer(f"✅ Пользователю {target} выдана подписка на {days} дней.")
+    await message.answer(f"✅ Пользователю {target} выдана подписка на {days} дней.", reply_markup=main_menu(message.from_user.id))
     try:
         await bot.send_message(target, f"🎉 Администратор выдал вам подписку на {days} дней! Теперь вы можете использовать бота.")
     except:
         pass
     await state.clear()
-    await message.answer("Главное меню:", reply_markup=main_menu(message.from_user.id))
 
-@dp.callback_query(lambda c: c.data == "main_menu")
-async def back_to_main_menu(callback: CallbackQuery, state: FSMContext):
-    await state.clear()
-    await callback.answer()
-    await callback.message.edit_text("Главное меню:", reply_markup=main_menu(callback.from_user.id))
-
+# ---- Команда отзыва подписки ----
 @dp.message(Command("revoke_sub"))
 async def cmd_revoke_sub(message: Message):
     if message.from_user.id not in ADMIN_IDS:
@@ -870,7 +836,14 @@ async def cmd_revoke_sub(message: Message):
     except:
         pass
 
-# ---------------------- Запуск ----------------------
+# ---- Универсальный возврат в главное меню ----
+@dp.callback_query(lambda c: c.data == "back_to_main")
+async def back_to_main(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
+    await state.clear()
+    await callback.message.edit_text("Главное меню:", reply_markup=main_menu(callback.from_user.id))
+
+# ===================== ЗАПУСК =====================
 async def on_startup():
     await init_db()
     logger.info("✅ База данных инициализирована")
