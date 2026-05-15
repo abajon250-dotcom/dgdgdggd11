@@ -1,16 +1,14 @@
 import asyncpg
 import os
 from datetime import datetime, timedelta
-from typing import List, Dict, Optional, Any
+from typing import List, Dict, Optional
 
-DATABASE_URL = os.getenv("DATABASE_URL")  # Railway сам подставляет переменную
+DATABASE_URL = os.getenv("DATABASE_URL")
 
 async def get_connection():
-    """Возвращает соединение с PostgreSQL"""
     return await asyncpg.connect(DATABASE_URL)
 
 async def init_db():
-    """Создание таблиц, если их нет (миграция)"""
     conn = await get_connection()
     await conn.execute('''
         CREATE TABLE IF NOT EXISTS users (
@@ -23,7 +21,6 @@ async def init_db():
             joined_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     ''')
-    # Проверяем наличие колонки vk_token (для старых схем)
     await conn.execute('''
         DO $$
         BEGIN
@@ -81,12 +78,11 @@ async def init_db():
     ''')
     await conn.close()
 
-# ---------- Users ----------
+# ----- Users -----
 async def add_user(telegram_id: int, username: str = None, first_name: str = None):
     conn = await get_connection()
     await conn.execute('''
-        INSERT INTO users (telegram_id, username, first_name) 
-        VALUES ($1, $2, $3)
+        INSERT INTO users (telegram_id, username, first_name) VALUES ($1, $2, $3)
         ON CONFLICT (telegram_id) DO UPDATE 
         SET username = EXCLUDED.username, first_name = EXCLUDED.first_name
     ''', telegram_id, username, first_name)
@@ -94,21 +90,9 @@ async def add_user(telegram_id: int, username: str = None, first_name: str = Non
 
 async def get_user(telegram_id: int) -> Optional[Dict]:
     conn = await get_connection()
-    row = await conn.fetchrow('''
-        SELECT telegram_id, username, first_name, subscription_until, joined_at, vk_token
-        FROM users WHERE telegram_id = $1
-    ''', telegram_id)
+    row = await conn.fetchrow('SELECT telegram_id, username, first_name, subscription_until, joined_at, vk_token FROM users WHERE telegram_id = $1', telegram_id)
     await conn.close()
-    if row:
-        return {
-            'telegram_id': row['telegram_id'],
-            'username': row['username'],
-            'first_name': row['first_name'],
-            'subscription_until': row['subscription_until'],
-            'joined_at': row['joined_at'],
-            'vk_token': row['vk_token']
-        }
-    return None
+    return dict(row) if row else None
 
 async def get_user_subscription(telegram_id: int) -> Optional[datetime]:
     conn = await get_connection()
@@ -142,7 +126,7 @@ async def get_all_users() -> List[int]:
     conn = await get_connection()
     rows = await conn.fetch('SELECT telegram_id FROM users')
     await conn.close()
-    return [row['telegram_id'] for row in rows]
+    return [r['telegram_id'] for r in rows]
 
 async def get_bot_stats() -> Dict:
     conn = await get_connection()
@@ -168,7 +152,7 @@ async def get_mailing_stats(limit=20) -> List[Dict]:
         FROM mailings ORDER BY started_at DESC LIMIT $1
     ''', limit)
     await conn.close()
-    return [dict(row) for row in rows]
+    return [dict(r) for r in rows]
 
 async def get_user_mailing_stats(user_id: int, limit=10) -> List[Dict]:
     conn = await get_connection()
@@ -177,23 +161,19 @@ async def get_user_mailing_stats(user_id: int, limit=10) -> List[Dict]:
         FROM mailings WHERE user_id = $1 ORDER BY started_at DESC LIMIT $2
     ''', user_id, limit)
     await conn.close()
-    return [dict(row) for row in rows]
+    return [dict(r) for r in rows]
 
-# ---------- Templates ----------
+# ----- Templates -----
 async def save_template(user_id: int, name: str, content: str, delay: float = 3.0):
     conn = await get_connection()
-    await conn.execute('''
-        INSERT INTO templates (user_id, name, content, delay) VALUES ($1, $2, $3, $4)
-    ''', user_id, name, content, delay)
+    await conn.execute('INSERT INTO templates (user_id, name, content, delay) VALUES ($1, $2, $3, $4)', user_id, name, content, delay)
     await conn.close()
 
 async def get_templates(user_id: int) -> List[Dict]:
     conn = await get_connection()
-    rows = await conn.fetch('''
-        SELECT id, name, content, delay FROM templates WHERE user_id = $1 ORDER BY created_at DESC
-    ''', user_id)
+    rows = await conn.fetch('SELECT id, name, content, delay FROM templates WHERE user_id = $1 ORDER BY created_at DESC', user_id)
     await conn.close()
-    return [dict(row) for row in rows]
+    return [dict(r) for r in rows]
 
 async def delete_template(template_id: int, user_id: int):
     conn = await get_connection()
@@ -206,24 +186,19 @@ async def get_template_by_id(template_id: int, user_id: int) -> Optional[Dict]:
     await conn.close()
     return dict(row) if row else None
 
-# ---------- Invoices ----------
+# ----- Invoices -----
 async def create_invoice_db(invoice_id: str, user_id: int, amount: float, currency: str, days: int):
     conn = await get_connection()
-    await conn.execute('''
-        INSERT INTO invoices (invoice_id, user_id, amount, currency, days) VALUES ($1, $2, $3, $4, $5)
-    ''', invoice_id, user_id, amount, currency, days)
+    await conn.execute('INSERT INTO invoices (invoice_id, user_id, amount, currency, days) VALUES ($1, $2, $3, $4, $5)', invoice_id, user_id, amount, currency, days)
     await conn.close()
 
 async def get_pending_invoice(user_id: int) -> Optional[Dict]:
     conn = await get_connection()
-    row = await conn.fetchrow('''
-        SELECT invoice_id, days FROM invoices WHERE user_id = $1 AND status = 'pending' ORDER BY created_at DESC LIMIT 1
-    ''', user_id)
+    row = await conn.fetchrow('SELECT invoice_id, days FROM invoices WHERE user_id = $1 AND status = $2 ORDER BY created_at DESC LIMIT 1', user_id, 'pending')
     await conn.close()
     return dict(row) if row else None
 
 async def mark_invoice_paid(invoice_id: str, days: int):
     conn = await get_connection()
-    await conn.execute('UPDATE invoices SET status = $1, completed_at = $2 WHERE invoice_id = $3',
-                       'paid', datetime.now(), invoice_id)
+    await conn.execute('UPDATE invoices SET status = $1, completed_at = $2 WHERE invoice_id = $3', 'paid', datetime.now(), invoice_id)
     await conn.close()
