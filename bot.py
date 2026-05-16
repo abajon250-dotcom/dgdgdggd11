@@ -995,7 +995,7 @@ async def admin_callback(callback: CallbackQuery, state: FSMContext):
             return
         text = "📈 Последние 20 проливов:\n"
         for m in mailings:
-            text += f"🆔 {m['id']} | {m['started_at'][:16]} | {m['vk_account_name']} | Всего: {m['total']} | ✅{m['success']} ❌{m['error']}\n"
+            text += f"🆔 {m['id']} | {m['started_at'].strftime('%Y-%m-%d %H:%M')} | {m['vk_account_name']} | Всего: {m['total']} | ✅{m['success']} ❌{m['error']}\n"
         await callback.message.edit_text(text[:4000], reply_markup=back_button("admin_panel"))
 
 
