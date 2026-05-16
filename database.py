@@ -10,6 +10,7 @@ async def get_connection():
 
 async def init_db():
     conn = await get_connection()
+    # Таблица users
     await conn.execute('''
         CREATE TABLE IF NOT EXISTS users (
             id SERIAL PRIMARY KEY,
@@ -17,10 +18,36 @@ async def init_db():
             username TEXT,
             first_name TEXT,
             subscription_until TIMESTAMP,
-            vk_token TEXT,
             joined_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     ''')
+    # Таблица для нескольких токенов VK
+    await conn.execute('''
+        CREATE TABLE IF NOT EXISTS user_vk_tokens (
+            id SERIAL PRIMARY KEY,
+            user_id BIGINT REFERENCES users(telegram_id) ON DELETE CASCADE,
+            token TEXT NOT NULL,
+            name TEXT DEFAULT 'Аккаунт VK',
+            is_active BOOLEAN DEFAULT FALSE,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            last_checked TIMESTAMP,
+            stats JSONB DEFAULT '{}'
+        )
+    ''')
+    # Миграция старых токенов (если были в users.vk_token)
+    await conn.execute('''
+        DO $$
+        BEGIN
+            IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='users' AND column_name='vk_token') THEN
+                INSERT INTO user_vk_tokens (user_id, token, name, is_active)
+                SELECT telegram_id, vk_token, 'Аккаунт VK', TRUE
+                FROM users WHERE vk_token IS NOT NULL AND vk_token != ''
+                ON CONFLICT DO NOTHING;
+                ALTER TABLE users DROP COLUMN vk_token;
+            END IF;
+        END $$;
+    ''')
+    # Таблица mailings
     await conn.execute('''
         CREATE TABLE IF NOT EXISTS mailings (
             id SERIAL PRIMARY KEY,
@@ -35,6 +62,7 @@ async def init_db():
             vk_account_name TEXT
         )
     ''')
+    # Таблица templates
     await conn.execute('''
         CREATE TABLE IF NOT EXISTS templates (
             id SERIAL PRIMARY KEY,
@@ -45,6 +73,7 @@ async def init_db():
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     ''')
+    # Таблица invoices
     await conn.execute('''
         CREATE TABLE IF NOT EXISTS invoices (
             id SERIAL PRIMARY KEY,
@@ -60,6 +89,7 @@ async def init_db():
     ''')
     await conn.close()
 
+# ----- Users -----
 async def add_user(telegram_id: int, username: str = None, first_name: str = None):
     conn = await get_connection()
     await conn.execute('''
@@ -71,7 +101,7 @@ async def add_user(telegram_id: int, username: str = None, first_name: str = Non
 
 async def get_user(telegram_id: int) -> Optional[Dict]:
     conn = await get_connection()
-    row = await conn.fetchrow('SELECT telegram_id, username, first_name, subscription_until, joined_at, vk_token FROM users WHERE telegram_id = $1', telegram_id)
+    row = await conn.fetchrow('SELECT telegram_id, username, first_name, subscription_until, joined_at FROM users WHERE telegram_id = $1', telegram_id)
     await conn.close()
     return dict(row) if row else None
 
@@ -91,17 +121,6 @@ async def revoke_subscription(telegram_id: int):
     conn = await get_connection()
     await conn.execute('UPDATE users SET subscription_until = NULL WHERE telegram_id = $1', telegram_id)
     await conn.close()
-
-async def save_vk_token(telegram_id: int, token: str):
-    conn = await get_connection()
-    await conn.execute('UPDATE users SET vk_token = $1 WHERE telegram_id = $2', token, telegram_id)
-    await conn.close()
-
-async def get_vk_token(telegram_id: int) -> Optional[str]:
-    conn = await get_connection()
-    token = await conn.fetchval('SELECT vk_token FROM users WHERE telegram_id = $1', telegram_id)
-    await conn.close()
-    return token
 
 async def get_all_users() -> List[int]:
     conn = await get_connection()
@@ -144,6 +163,7 @@ async def get_user_mailing_stats(user_id: int, limit=10) -> List[Dict]:
     await conn.close()
     return [dict(r) for r in rows]
 
+# ----- Templates -----
 async def save_template(user_id: int, name: str, content: str, delay: float = 3.0):
     conn = await get_connection()
     await conn.execute('INSERT INTO templates (user_id, name, content, delay) VALUES ($1, $2, $3, $4)', user_id, name, content, delay)
@@ -166,6 +186,7 @@ async def get_template_by_id(template_id: int, user_id: int) -> Optional[Dict]:
     await conn.close()
     return dict(row) if row else None
 
+# ----- Invoices -----
 async def create_invoice_db(invoice_id: str, user_id: int, amount: float, currency: str, days: int):
     conn = await get_connection()
     await conn.execute('INSERT INTO invoices (invoice_id, user_id, amount, currency, days) VALUES ($1, $2, $3, $4, $5)', invoice_id, user_id, amount, currency, days)
@@ -181,3 +202,56 @@ async def mark_invoice_paid(invoice_id: str, days: int):
     conn = await get_connection()
     await conn.execute('UPDATE invoices SET status = $1, completed_at = $2 WHERE invoice_id = $3', 'paid', datetime.now(), invoice_id)
     await conn.close()
+
+# ----- Множественные токены VK -----
+async def add_vk_token(user_id: int, token: str, name: str = None):
+    conn = await get_connection()
+    # Новый токен добавляем как неактивный (чтобы пользователь сам выбрал активный)
+    await conn.execute('''
+        INSERT INTO user_vk_tokens (user_id, token, name, is_active) 
+        VALUES ($1, $2, COALESCE($3, 'Аккаунт VK'), FALSE)
+    ''', user_id, token, name)
+    await conn.close()
+
+async def add_multiple_vk_tokens(user_id: int, tokens: List[tuple]):  # [(token, name), ...]
+    if not tokens:
+        return
+    conn = await get_connection()
+    for token, name in tokens:
+        await conn.execute('''
+            INSERT INTO user_vk_tokens (user_id, token, name, is_active) 
+            VALUES ($1, $2, $3, FALSE)
+        ''', user_id, token, name)
+    await conn.close()
+
+async def get_user_tokens(user_id: int) -> List[Dict]:
+    conn = await get_connection()
+    rows = await conn.fetch('''
+        SELECT id, token, name, is_active, created_at, stats 
+        FROM user_vk_tokens WHERE user_id = $1 ORDER BY created_at
+    ''', user_id)
+    await conn.close()
+    return [dict(r) for r in rows]
+
+async def set_active_token(user_id: int, token_id: int):
+    conn = await get_connection()
+    await conn.execute('UPDATE user_vk_tokens SET is_active = FALSE WHERE user_id = $1', user_id)
+    await conn.execute('UPDATE user_vk_tokens SET is_active = TRUE WHERE id = $2 AND user_id = $1', user_id, token_id)
+    await conn.close()
+
+async def delete_token(user_id: int, token_id: int):
+    conn = await get_connection()
+    await conn.execute('DELETE FROM user_vk_tokens WHERE id = $1 AND user_id = $2', token_id, user_id)
+    await conn.close()
+
+async def update_token_stats(user_id: int, token_id: int, stats: dict):
+    conn = await get_connection()
+    await conn.execute('UPDATE user_vk_tokens SET stats = $1, last_checked = $2 WHERE id = $3 AND user_id = $4',
+                       stats, datetime.now(), token_id, user_id)
+    await conn.close()
+
+async def get_active_token(user_id: int) -> Optional[Dict]:
+    conn = await get_connection()
+    row = await conn.fetchrow('SELECT id, token, name, stats FROM user_vk_tokens WHERE user_id = $1 AND is_active = TRUE', user_id)
+    await conn.close()
+    return dict(row) if row else None
