@@ -23,7 +23,7 @@ from requests.adapters import HTTPAdapter
 from urllib3.poolmanager import PoolManager
 
 # Импорт из БД (упрощённая версия – только один токен на пользователя)
-from database_simple import (
+from database import ( 
     init_db, add_user, get_user, get_user_subscription, set_subscription,
     revoke_subscription, save_vk_token, get_vk_token, get_all_users,
     get_bot_stats, save_mailing_stats, get_mailing_stats, get_user_mailing_stats,
