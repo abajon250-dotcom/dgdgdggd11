@@ -1,7 +1,7 @@
 import asyncpg
 import os
 from datetime import datetime, timedelta
-from typing import List, Dict, Optional
+from typing import List, Dict, Optional, Tuple   # <-- добавили Tuple
 
 DATABASE_URL = os.getenv("DATABASE_URL")
 
