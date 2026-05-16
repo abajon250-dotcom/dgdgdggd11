@@ -1,7 +1,7 @@
 import asyncpg
 import os
 from datetime import datetime, timedelta
-from typing import List, Dict, Optional, Tuple   # <-- добавили Tuple
+from typing import List, Dict, Optional, Tuple
 
 DATABASE_URL = os.getenv("DATABASE_URL")
 
@@ -34,7 +34,7 @@ async def init_db():
             stats JSONB DEFAULT '{}'
         )
     ''')
-    # Миграция старых токенов (если были в users.vk_token)
+    # Миграция старых токенов (если были)
     await conn.execute('''
         DO $$
         BEGIN
@@ -256,7 +256,6 @@ async def get_active_token(user_id: int) -> Optional[Dict]:
     return dict(row) if row else None
 
 async def validate_and_clean_tokens(user_id: int, check_func) -> Tuple[int, int]:
-    """Проверяет все токены пользователя, удаляет невалидные. check_func - асинхронная функция проверки токена"""
     tokens = await get_user_tokens(user_id)
     deleted = 0
     for t in tokens:
