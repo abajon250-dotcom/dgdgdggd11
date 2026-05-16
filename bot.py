@@ -22,231 +22,14 @@ from vk_api.exceptions import ApiError
 from requests.adapters import HTTPAdapter
 from urllib3.poolmanager import PoolManager
 
-# ===================== ВСТРОЕННАЯ БАЗА ДАННЫХ =====================
-import asyncpg
+from database import (
+    init_db, add_user, get_user, get_user_subscription, set_subscription,
+    revoke_subscription, save_vk_token, get_vk_token, get_all_users,
+    get_bot_stats, save_mailing_stats, get_mailing_stats, get_user_mailing_stats,
+    save_template, get_templates, delete_template, get_template_by_id,
+    create_invoice_db, get_pending_invoice, mark_invoice_paid
+)
 
-DATABASE_URL = os.getenv("DATABASE_URL")
-
-
-async def get_connection():
-    return await asyncpg.connect(DATABASE_URL)
-
-
-async def init_db():
-    conn = await get_connection()
-    await conn.execute('''
-        CREATE TABLE IF NOT EXISTS users (
-            id SERIAL PRIMARY KEY,
-            telegram_id BIGINT UNIQUE,
-            username TEXT,
-            first_name TEXT,
-            subscription_until TIMESTAMP,
-            vk_token TEXT,
-            joined_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        )
-    ''')
-    # Добавляем колонку vk_token, если нет (на всякий случай)
-    await conn.execute('''
-        DO $$
-        BEGIN
-            IF NOT EXISTS (SELECT 1 FROM information_schema.columns 
-                           WHERE table_name='users' AND column_name='vk_token') THEN
-                ALTER TABLE users ADD COLUMN vk_token TEXT;
-            END IF;
-        END $$;
-    ''')
-    await conn.execute('''
-        CREATE TABLE IF NOT EXISTS mailings (
-            id SERIAL PRIMARY KEY,
-            user_id BIGINT,
-            started_at TIMESTAMP,
-            finished_at TIMESTAMP,
-            total_recipients INTEGER,
-            sent_success INTEGER,
-            sent_error INTEGER,
-            total_time_seconds REAL,
-            message_text TEXT,
-            vk_account_name TEXT
-        )
-    ''')
-    await conn.execute('''
-        CREATE TABLE IF NOT EXISTS templates (
-            id SERIAL PRIMARY KEY,
-            user_id BIGINT,
-            name TEXT,
-            content TEXT,
-            delay REAL DEFAULT 3.0,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        )
-    ''')
-    await conn.execute('''
-        CREATE TABLE IF NOT EXISTS invoices (
-            id SERIAL PRIMARY KEY,
-            invoice_id TEXT UNIQUE,
-            user_id BIGINT,
-            amount REAL,
-            currency TEXT,
-            days INTEGER,
-            status TEXT DEFAULT 'pending',
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            completed_at TIMESTAMP
-        )
-    ''')
-    await conn.close()
-
-
-async def add_user(telegram_id: int, username: str = None, first_name: str = None):
-    conn = await get_connection()
-    await conn.execute('''
-        INSERT INTO users (telegram_id, username, first_name) VALUES ($1, $2, $3)
-        ON CONFLICT (telegram_id) DO UPDATE 
-        SET username = EXCLUDED.username, first_name = EXCLUDED.first_name
-    ''', telegram_id, username, first_name)
-    await conn.close()
-
-
-async def get_user(telegram_id: int) -> Optional[Dict]:
-    conn = await get_connection()
-    row = await conn.fetchrow(
-        'SELECT telegram_id, username, first_name, subscription_until, joined_at, vk_token FROM users WHERE telegram_id = $1',
-        telegram_id)
-    await conn.close()
-    return dict(row) if row else None
-
-
-async def get_user_subscription(telegram_id: int) -> Optional[datetime]:
-    conn = await get_connection()
-    val = await conn.fetchval('SELECT subscription_until FROM users WHERE telegram_id = $1', telegram_id)
-    await conn.close()
-    return val
-
-
-async def set_subscription(telegram_id: int, days: float):
-    until = datetime.now() + timedelta(days=days)
-    conn = await get_connection()
-    await conn.execute('UPDATE users SET subscription_until = $1 WHERE telegram_id = $2', until, telegram_id)
-    await conn.close()
-
-
-async def revoke_subscription(telegram_id: int):
-    conn = await get_connection()
-    await conn.execute('UPDATE users SET subscription_until = NULL WHERE telegram_id = $1', telegram_id)
-    await conn.close()
-
-
-async def save_vk_token(telegram_id: int, token: str):
-    conn = await get_connection()
-    await conn.execute('UPDATE users SET vk_token = $1 WHERE telegram_id = $2', token, telegram_id)
-    await conn.close()
-
-
-async def get_vk_token(telegram_id: int) -> Optional[str]:
-    conn = await get_connection()
-    token = await conn.fetchval('SELECT vk_token FROM users WHERE telegram_id = $1', telegram_id)
-    await conn.close()
-    return token
-
-
-async def get_all_users() -> List[int]:
-    conn = await get_connection()
-    rows = await conn.fetch('SELECT telegram_id FROM users')
-    await conn.close()
-    return [r['telegram_id'] for r in rows]
-
-
-async def get_bot_stats() -> Dict:
-    conn = await get_connection()
-    total_users = await conn.fetchval('SELECT COUNT(*) FROM users')
-    total_mailings = await conn.fetchval('SELECT COUNT(*) FROM mailings')
-    total_sent = await conn.fetchval('SELECT COALESCE(SUM(sent_success),0) FROM mailings')
-    total_errors = await conn.fetchval('SELECT COALESCE(SUM(sent_error),0) FROM mailings')
-    await conn.close()
-    return {'users': total_users, 'mailings': total_mailings, 'sent': total_sent, 'errors': total_errors}
-
-
-async def save_mailing_stats(user_id: int, total: int, success: int, error: int, total_time: float, message: str,
-                             vk_name: str):
-    conn = await get_connection()
-    await conn.execute('''
-        INSERT INTO mailings (user_id, started_at, finished_at, total_recipients, sent_success, sent_error, total_time_seconds, message_text, vk_account_name)
-        VALUES ($1, $2, $2, $3, $4, $5, $6, $7, $8)
-    ''', user_id, datetime.now(), total, success, error, total_time, message[:500], vk_name)
-    await conn.close()
-
-
-async def get_mailing_stats(limit=20) -> List[Dict]:
-    conn = await get_connection()
-    rows = await conn.fetch('''
-        SELECT id, user_id, started_at, total_recipients, sent_success, sent_error, total_time_seconds, vk_account_name
-        FROM mailings ORDER BY started_at DESC LIMIT $1
-    ''', limit)
-    await conn.close()
-    return [dict(r) for r in rows]
-
-
-async def get_user_mailing_stats(user_id: int, limit=10) -> List[Dict]:
-    conn = await get_connection()
-    rows = await conn.fetch('''
-        SELECT started_at, total_recipients, sent_success, sent_error, total_time_seconds, vk_account_name
-        FROM mailings WHERE user_id = $1 ORDER BY started_at DESC LIMIT $2
-    ''', user_id, limit)
-    await conn.close()
-    return [dict(r) for r in rows]
-
-
-async def save_template(user_id: int, name: str, content: str, delay: float = 3.0):
-    conn = await get_connection()
-    await conn.execute('INSERT INTO templates (user_id, name, content, delay) VALUES ($1, $2, $3, $4)', user_id, name,
-                       content, delay)
-    await conn.close()
-
-
-async def get_templates(user_id: int) -> List[Dict]:
-    conn = await get_connection()
-    rows = await conn.fetch(
-        'SELECT id, name, content, delay FROM templates WHERE user_id = $1 ORDER BY created_at DESC', user_id)
-    await conn.close()
-    return [dict(r) for r in rows]
-
-
-async def delete_template(template_id: int, user_id: int):
-    conn = await get_connection()
-    await conn.execute('DELETE FROM templates WHERE id = $1 AND user_id = $2', template_id, user_id)
-    await conn.close()
-
-
-async def get_template_by_id(template_id: int, user_id: int) -> Optional[Dict]:
-    conn = await get_connection()
-    row = await conn.fetchrow('SELECT id, name, content, delay FROM templates WHERE id = $1 AND user_id = $2',
-                              template_id, user_id)
-    await conn.close()
-    return dict(row) if row else None
-
-
-async def create_invoice_db(invoice_id: str, user_id: int, amount: float, currency: str, days: int):
-    conn = await get_connection()
-    await conn.execute('INSERT INTO invoices (invoice_id, user_id, amount, currency, days) VALUES ($1, $2, $3, $4, $5)',
-                       invoice_id, user_id, amount, currency, days)
-    await conn.close()
-
-
-async def get_pending_invoice(user_id: int) -> Optional[Dict]:
-    conn = await get_connection()
-    row = await conn.fetchrow(
-        'SELECT invoice_id, days FROM invoices WHERE user_id = $1 AND status = $2 ORDER BY created_at DESC LIMIT 1',
-        user_id, 'pending')
-    await conn.close()
-    return dict(row) if row else None
-
-
-async def mark_invoice_paid(invoice_id: str, days: int):
-    conn = await get_connection()
-    await conn.execute('UPDATE invoices SET status = $1, completed_at = $2 WHERE invoice_id = $3', 'paid',
-                       datetime.now(), invoice_id)
-    await conn.close()
-
-
-# ===================== ОСНОВНОЙ КОД БОТА =====================
 load_dotenv()
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 ADMIN_IDS = [int(x.strip().lstrip('@')) for x in os.getenv("ADMIN_IDS", "").split(",") if
@@ -336,6 +119,7 @@ def solve_captcha(captcha_url: str) -> str:
 
 
 def get_vk_user_info(vk_token: str) -> Dict[str, Any]:
+    """Проверяет валидность токена и возвращает информацию об аккаунте"""
     vk_session = create_vk_session(vk_token)
     vk = vk_session.get_api()
     try:
@@ -350,6 +134,20 @@ def get_vk_user_info(vk_token: str) -> Dict[str, Any]:
             'phone': phone,
             'id': info.get('id', 0)
         }
+    except ApiError as e:
+        # Расшифровываем ошибку VK
+        if e.code == 5:
+            raise Exception("Токен невалиден (ошибка авторизации). Возможно, токен устарел или неверный.")
+        elif e.code == 10:
+            raise Exception("Внутренняя ошибка сервера VK. Попробуйте позже.")
+        elif e.code == 14:
+            raise Exception("Требуется капча. Убедитесь, что ANTICAPTCHA_KEY задан и баланс положительный.")
+        elif e.code == 30:
+            raise Exception("Профиль пользователя удалён или заблокирован.")
+        elif e.code == 200:
+            raise Exception("Нет доступа. Убедитесь, что токен имеет права на отправку сообщений (scope: messages).")
+        else:
+            raise Exception(f"Ошибка VK {e.code}: {e.error.get('error_msg', 'Неизвестная ошибка')}")
     except Exception as e:
         raise e
 
@@ -569,7 +367,7 @@ async def mailing_task(vk_token: str, recipients: List[Dict], text: str, delay: 
     await save_mailing_stats(user_telegram_id, total, sent_ok, sent_err, total_time, text[:200], vk_name)
 
 
-# ---------------------- FSM состояния ----------------------
+# ---------------------- FSM ----------------------
 class BotStates(StatesGroup):
     waiting_vk_token = State()
     waiting_group_filter = State()
@@ -642,10 +440,18 @@ async def cmd_start(message: Message, state: FSMContext):
     await message.answer(welcome, parse_mode="HTML", reply_markup=main_menu(uid))
     token = await get_vk_token(uid)
     if token:
-        await message.answer("✅ Токен уже сохранён. Можете начинать рассылку.", reply_markup=main_menu(uid))
+        # Проверяем валидность сохранённого токена
+        try:
+            await asyncio.to_thread(get_vk_user_info, token)
+            await message.answer("✅ Токен уже сохранён и валиден. Можете начинать рассылку.",
+                                 reply_markup=main_menu(uid))
+        except Exception as e:
+            await message.answer(
+                f"⚠️ Сохранённый токен невалиден: {str(e)}\nВведите новый через кнопку «🔑 Ввести токен VK».",
+                reply_markup=main_menu(uid))
 
 
-# ---- Ввод токена ----
+# ---- Ввод токена с понятными ошибками ----
 @dp.callback_query(lambda c: c.data == "enter_token")
 async def enter_vk_token(callback: CallbackQuery, state: FSMContext):
     await callback.answer()
@@ -662,13 +468,14 @@ async def process_vk_token(message: Message, state: FSMContext):
         await message.answer("❌ Токен не может быть пустым.")
         return
     uid = message.from_user.id
-    msg = await message.answer("🔄 Проверка...")
+    msg = await message.answer("🔄 Проверка токена...")
     try:
         user_info = await asyncio.to_thread(get_vk_user_info, token)
         _, stats = await asyncio.to_thread(get_recipients, token)
     except Exception as e:
         await msg.delete()
-        await message.answer(f"<tg-emoji emoji-id='5276240711795107620'></tg-emoji> Ошибка: {e}", parse_mode="HTML")
+        await message.answer(f"<tg-emoji emoji-id='5276240711795107620'></tg-emoji> <b>Ошибка:</b> {str(e)}",
+                             parse_mode="HTML")
         return
     await save_vk_token(uid, token)
     await msg.delete()
@@ -740,7 +547,15 @@ async def start_newsletter(callback: CallbackQuery, state: FSMContext):
     if not token:
         await callback.message.edit_text("❌ Нет токена. Введите через «🔑 Ввести токен VK».", reply_markup=back_button())
         return
-    await state.update_data(vk_token=token)
+    # Проверяем валидность токена перед рассылкой
+    try:
+        user_info = await asyncio.to_thread(get_vk_user_info, token)
+        await state.update_data(vk_token=token, user_info=user_info)
+    except Exception as e:
+        await callback.message.edit_text(
+            f"<tg-emoji emoji-id='5276240711795107620'></tg-emoji> Токен невалиден: {str(e)}", parse_mode="HTML",
+            reply_markup=back_button())
+        return
     kb = InlineKeyboardMarkup(
         inline_keyboard=[[InlineKeyboardButton(text="🚫 Пропустить", callback_data="skip_filter", style="default")]])
     await callback.message.edit_text("📌 Введите название беседы для фильтра (или нажмите «Пропустить»):",
@@ -768,20 +583,20 @@ async def proceed_load(target: Message, state: FSMContext, callback: CallbackQue
     data = await state.get_data()
     token = data.get("vk_token")
     group_filter = data.get("group_filter")
+    user_info = data.get("user_info")
     if callback:
         await callback.message.edit_text("🔄 Загружаю диалоги...", reply_markup=None)
     else:
         await target.answer("🔄 Загружаю диалоги...")
     try:
-        user_info = await asyncio.to_thread(get_vk_user_info, token)
         recipients, stats = await asyncio.to_thread(get_recipients, token, group_filter)
     except Exception as e:
-        await target.answer(f"❌ Ошибка: {e}", reply_markup=back_button())
+        await target.answer(f"❌ Ошибка загрузки диалогов: {e}", reply_markup=back_button())
         return
     if not recipients:
-        await target.answer("⚠️ Нет диалогов.", reply_markup=back_button())
+        await target.answer("⚠️ Нет диалогов, соответствующих критериям.", reply_markup=back_button())
         return
-    await state.update_data(recipients=recipients, user_info=user_info, stats=stats)
+    await state.update_data(recipients=recipients, stats=stats)
     templates = await get_templates(target.from_user.id)
     if templates:
         kb = InlineKeyboardMarkup(inline_keyboard=[
