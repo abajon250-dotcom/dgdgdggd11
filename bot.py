@@ -236,9 +236,11 @@ def send_vk_message(vk, peer_id: int, text: str) -> bool:
             return False
 
 
-def make_progress_bar(percent: float, length: int = 10) -> str:
+def make_progress_bar_text(percent: float, length: int = 20) -> str:
+    """Возвращает текстовую полосу прогресса из символов █ и ░"""
     filled = int(length * percent / 100)
-    return "🤖" * filled + "⚙️" * (length - filled)
+    empty = length - filled
+    return "█" * filled + "░" * empty
 
 
 # ---------------------- CryptoBot ----------------------
@@ -285,7 +287,7 @@ async def check_payment(user_id: int) -> bool:
     return False
 
 
-# ---------------------- Рассылка с прогресс-баром ----------------------
+# ---------------------- Рассылка с новым прогресс-баром ----------------------
 async def mailing_task(vk_token: str, recipients: List[Dict], text: str, delay: float,
                        chat_id: int, user_info: Dict, stats: Dict, user_telegram_id: int,
                        token_name: str, progress_msg_id: int):
@@ -297,7 +299,6 @@ async def mailing_task(vk_token: str, recipients: List[Dict], text: str, delay: 
     start_time = time.time()
     last_update = start_time
 
-    # Функция обновления прогресса
     async def update_progress(current_idx: int):
         nonlocal last_update
         now = time.time()
@@ -307,19 +308,25 @@ async def mailing_task(vk_token: str, recipients: List[Dict], text: str, delay: 
         percent = (current_idx / total) * 100 if total > 0 else 100
         elapsed = now - start_time
         remaining = ((total - current_idx) / (current_idx / elapsed)) if current_idx > 0 else 0
-        bar = make_progress_bar(percent)
+        bar = make_progress_bar_text(percent)
         status = (
-            f"<tg-emoji emoji-id='5472096095280572227'></tg-emoji> Аккаунт VK: {token_name}\n"
-            f"👤 {user_info.get('first_name')} {user_info.get('last_name')}\n"
+            f"<tg-emoji emoji-id='5472096095280572227'></tg-emoji> <b>Рассылка VK в процессе</b>\n\n"
+            f"👤 Аккаунт: {user_info.get('first_name')} {user_info.get('last_name')}\n"
             f"🤙 Телефон: {user_info.get('phone')}\n"
-            f"📂 Всего чатов: {stats['total']} (бесед: {stats['dialogues']}, личных: {stats['contacts']}, групп: {stats['groups']})\n"
-            f"<tg-emoji emoji-id='5382194935057372936'></tg-emoji> Прогресс — {percent:.1f}%\n"
-            f"{bar}\n"
-            f"⏲️ Осталось {remaining:.1f} с\n"
-            f"📊 {current_idx}/{total} | <tg-emoji emoji-id='5206401524200145033'></tg-emoji>{sent_ok} <tg-emoji emoji-id='5206510891247371052'></tg-emoji>{sent_err}"
+            f"📂 Всего чатов: {stats['total']}\n"
+            f"   ├ Беседы: {stats['dialogues']}\n"
+            f"   ├ Личные: {stats['contacts']}\n"
+            f"   └ Группы: {stats['groups']}\n\n"
+            f"📊 Статистика рассылки:\n"
+            f"   Всего: {total}\n"
+            f"   Отправлено: {sent_ok}\n"
+            f"   Ошибок: {sent_err}\n"
+            f"   Прогресс: {percent:.1f}%\n"
+            f"   {bar}\n"
+            f"⏲️ Осталось ~ {remaining:.0f} с"
         )
         try:
-            await bot.edit_message_text(status, chat_id, progress_msg_id, parse_mode="HTML")
+            await bot.edit_message_text(status, chat_id, message_id=progress_msg_id, parse_mode="HTML")
         except Exception as e:
             logger.warning(f"Ошибка обновления прогресса: {e}")
 
@@ -348,6 +355,21 @@ async def mailing_task(vk_token: str, recipients: List[Dict], text: str, delay: 
     await bot.delete_message(chat_id, progress_msg_id)
     vk_name = f"{user_info.get('first_name')} {user_info.get('last_name')}".strip()
     await save_mailing_stats(user_telegram_id, total, sent_ok, sent_err, total_time, text[:200], vk_name)
+
+
+# ---------------------- Проверка всех токенов на валидность ----------------------
+async def validate_and_clean_tokens(user_id: int) -> Tuple[int, int]:
+    """Проверяет все токены пользователя, удаляет невалидные. Возвращает (удалено, осталось)"""
+    tokens = await get_user_tokens(user_id)
+    deleted = 0
+    for t in tokens:
+        try:
+            await asyncio.to_thread(get_vk_user_info, t['token'])
+        except Exception:
+            await delete_token(user_id, t['id'])
+            deleted += 1
+    remaining = len(tokens) - deleted
+    return deleted, remaining
 
 
 # ---------------------- FSM состояния ----------------------
@@ -505,7 +527,7 @@ async def process_mass_tokens(message: Message, state: FSMContext):
     await state.clear()
 
 
-# ---- Просмотр и выбор активного аккаунта ----
+# ---- Просмотр и выбор активного аккаунта + проверка всех токенов ----
 @dp.callback_query(lambda c: c.data == "check_vk")
 async def list_accounts(callback: CallbackQuery):
     await callback.answer()
@@ -528,8 +550,22 @@ async def list_accounts(callback: CallbackQuery):
         [InlineKeyboardButton(text="🔄 Обновить статистику", callback_data="refresh_accounts", style="default")])
     kb.inline_keyboard.append(
         [InlineKeyboardButton(text="🗑️ Удалить аккаунт", callback_data="delete_account_menu", style="danger")])
+    kb.inline_keyboard.append(
+        [InlineKeyboardButton(text="✅ Проверить все токены", callback_data="validate_all_tokens", style="success")])
     kb.inline_keyboard.append([InlineKeyboardButton(text="◀️ Назад", callback_data="back_to_main", style="default")])
     await callback.message.edit_text(text, parse_mode="HTML", reply_markup=kb)
+
+
+# ---- Проверка всех токенов на валидность и удаление нерабочих ----
+@dp.callback_query(lambda c: c.data == "validate_all_tokens")
+async def validate_all_tokens(callback: CallbackQuery):
+    await callback.answer()
+    uid = callback.from_user.id
+    await callback.message.edit_text("🔄 Проверяю все токены...", reply_markup=None)
+    deleted, remaining = await validate_and_clean_tokens(uid)
+    await callback.message.edit_text(
+        f"✅ Проверка завершена.\nУдалено невалидных: {deleted}\nОсталось активных: {remaining}",
+        reply_markup=back_button("check_vk"))
 
 
 @dp.callback_query(lambda c: c.data.startswith("activate_token_"))
@@ -647,10 +683,8 @@ async def start_newsletter(callback: CallbackQuery, state: FSMContext):
             "❌ Нет активного аккаунта. Добавьте и активируйте через «🔍 Проверить аккаунты».",
             reply_markup=back_button())
         return
-    # Сохраняем токен и данные активного аккаунта
     await state.update_data(vk_token=active['token'], token_name=active['name'], token_id=active['id'])
 
-    # Клавиатура с кнопкой "Пропустить"
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="🚫 Пропустить", callback_data="skip_filter", style="default")]
     ])
@@ -659,7 +693,6 @@ async def start_newsletter(callback: CallbackQuery, state: FSMContext):
     await state.set_state(BotStates.waiting_group_filter)
 
 
-# Обработчик для кнопки "Пропустить"
 @dp.callback_query(lambda c: c.data == "skip_filter", StateFilter(BotStates.waiting_group_filter))
 async def skip_filter(callback: CallbackQuery, state: FSMContext):
     await callback.answer()
@@ -682,7 +715,6 @@ async def proceed_load(target: Message, state: FSMContext, callback: CallbackQue
     token_name = data.get("token_name")
     group_filter = data.get("group_filter")
 
-    # Отправляем сообщение о загрузке
     if callback:
         await callback.message.edit_text("🔄 Загружаю диалоги...", reply_markup=None)
     else:
@@ -785,13 +817,11 @@ async def start_mailing(message: Message, state: FSMContext, callback: CallbackQ
         await state.clear()
         return
 
-    # Отправляем стартовое сообщение прогресса
     progress_msg = await message.answer("⏳ Запуск рассылки...")
     if callback:
         await callback.message.delete()
     await state.clear()
 
-    # Запускаем задачу рассылки с переданным message_id прогресса
     asyncio.create_task(
         mailing_task(token, recipients, text, delay, message.chat.id, user_info, stats, message.from_user.id,
                      token_name, progress_msg.message_id))
@@ -1022,9 +1052,17 @@ async def back_to_main(callback: CallbackQuery, state: FSMContext):
     await callback.message.edit_text("Главное меню:", reply_markup=main_menu(callback.from_user.id))
 
 
-# ---------------------- Запуск ----------------------
+# ---------------------- Запуск с автоматической проверкой токенов ----------------------
 async def on_startup():
     await init_db()
+    # Автоматическая проверка и удаление невалидных токенов для всех пользователей
+    all_users = await get_all_users()
+    total_deleted = 0
+    for uid in all_users:
+        deleted, _ = await validate_and_clean_tokens(uid)
+        total_deleted += deleted
+    if total_deleted:
+        logger.info(f"🧹 При старте удалено {total_deleted} невалидных токенов")
     logger.info("✅ Бот запущен")
     if not ANTICAPTCHA_KEY:
         logger.warning("⚠️ Нет ключа 2captcha")
