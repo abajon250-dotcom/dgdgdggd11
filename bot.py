@@ -12,7 +12,7 @@ from typing import List, Dict, Any, Optional, Tuple
 
 from dotenv import load_dotenv
 from aiogram import Bot, Dispatcher
-from aiogram.filters import Command, StateFilter
+from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
@@ -120,54 +120,41 @@ def solve_captcha(captcha_url: str) -> str:
         raise RuntimeError("Время ожидания капчи истекло.")
 
 
-def validate_vk_token(token: str) -> Tuple[bool, str, Optional[Dict], Optional[Dict]]:
-    """
-    Полная проверка токена:
-    - Возвращает (валиден?, сообщение об ошибке, user_info, stats)
-    """
+def validate_vk_token_strong(token: str) -> Tuple[bool, str, Optional[Dict], Optional[Dict]]:
     vk_session = create_vk_session(token)
     vk = vk_session.get_api()
     try:
-        # 1. Проверяем получение информации об аккаунте
         info = vk.account.getProfileInfo()
-        first_name = info.get('first_name', '')
-        last_name = info.get('last_name', '')
         try:
             phone = vk.account.getPhone().get('phone', 'не указан')
         except:
             phone = 'нет доступа'
         user_info = {
-            'first_name': first_name,
-            'last_name': last_name,
+            'first_name': info.get('first_name', ''),
+            'last_name': info.get('last_name', ''),
             'phone': phone,
             'id': info.get('id', 0)
         }
-        # 2. Проверяем возможность отправлять сообщения (пытаемся получить диалоги)
         convs = vk.messages.getConversations(count=1)
         if 'items' not in convs:
-            return False, "Токен не имеет прав на чтение диалогов (scope: messages)", None, None
-        # 3. Загружаем полную статистику диалогов
-        recipients, stats = get_recipients_from_token(vk, token)
+            return False, "Токен не имеет прав на чтение диалогов (scope: messages).", None, None
+        recipients, stats = get_recipients_from_token(vk, None, only_friends=False)
         return True, "OK", user_info, stats
     except ApiError as e:
         if e.code == 5:
-            return False, "Токен невалиден (ошибка авторизации). Возможно, токен устарел или неверный.", None, None
-        elif e.code == 10:
-            return False, "Внутренняя ошибка сервера VK. Попробуйте позже.", None, None
-        elif e.code == 14:
-            return False, "Требуется капча. Убедитесь, что ANTICAPTCHA_KEY задан и баланс положительный.", None, None
+            return False, "Токен невалиден (ошибка авторизации).", None, None
         elif e.code == 30:
             return False, "Профиль пользователя удалён или заблокирован.", None, None
         elif e.code == 200:
-            return False, "Нет доступа. Убедитесь, что токен имеет права на отправку сообщений (scope: messages).", None, None
+            return False, "Нет доступа. Убедитесь, что токен имеет права на отправку сообщений.", None, None
         else:
             return False, f"Ошибка VK {e.code}: {e.error.get('error_msg', 'Неизвестная ошибка')}", None, None
     except Exception as e:
         return False, f"Неизвестная ошибка: {str(e)}", None, None
 
 
-def get_recipients_from_token(vk, token: str = None, group_filter: str = None) -> Tuple[List[Dict], Dict]:
-    # Если передан vk-объект, используем его, иначе создаём новый
+def get_recipients_from_token(vk, token: str = None, only_friends: bool = False) -> Tuple[List[Dict], Dict]:
+    """Получает получателей. Если only_friends=True – только личные диалоги (друзья)."""
     if vk is None:
         vk_session = create_vk_session(token)
         vk = vk_session.get_api()
@@ -200,11 +187,12 @@ def get_recipients_from_token(vk, token: str = None, group_filter: str = None) -
             if not can_write:
                 continue
             peer_type = peer.get("type")
+            # Если only_friends=True – пропускаем всё, кроме личных сообщений
+            if only_friends and peer_type != "user":
+                continue
             title = None
             if peer_type != "user":
                 title = conversation.get("chat_settings", {}).get("title", "")
-                if group_filter and group_filter.lower() not in title.lower():
-                    continue
             if peer_type == "user":
                 contacts_count += 1
             elif peer_type == "chat":
@@ -253,7 +241,7 @@ def send_vk_message(vk, peer_id: int, text: str) -> bool:
                 except ApiError as e2:
                     logger.error(f"❌ Не удалось отправить после капчи: {e2}")
                     return False
-            elif e.code in (901, 913, 917):
+            elif e.code in (901, 913, 917, 902):
                 logger.warning(f"⚠️ Ошибка {e.code}, пропускаем получателя {peer_id}")
                 return False
             else:
@@ -336,14 +324,11 @@ async def mailing_task(vk_token: str, recipients: List[Dict], text: str, delay: 
         remaining = ((total - current_idx) / (current_idx / elapsed)) if current_idx > 0 else 0
         bar = make_progress_bar_text(percent)
         status = (
-            f"<tg-emoji emoji-id='5472096095280572227'></tg-emoji> <b>Рассылка VK в процессе</b>\n\n"
+            f"<tg-emoji emoji-id='5472096095280572227'></tg-emoji> <b>Рассылка друзьям VK в процессе</b>\n\n"
             f"👤 Аккаунт: {token_name}\n"
             f"👤 Владелец: {user_info.get('first_name')} {user_info.get('last_name')}\n"
             f"🤙 Телефон: {user_info.get('phone')}\n"
-            f"📂 Всего чатов: {stats['total']}\n"
-            f"   ├ Беседы: {stats['dialogues']}\n"
-            f"   ├ Личные: {stats['contacts']}\n"
-            f"   └ Группы: {stats['groups']}\n\n"
+            f"📂 Всего друзей: {stats['total']}\n"
             f"📊 Статистика рассылки:\n"
             f"   Всего: {total}\n"
             f"   Отправлено: {sent_ok}\n"
@@ -353,7 +338,7 @@ async def mailing_task(vk_token: str, recipients: List[Dict], text: str, delay: 
             f"⏲️ Осталось ~ {remaining:.0f} с"
         )
         try:
-            await bot.edit_message_text(status, chat_id, message_id=progress_msg_id, parse_mode="HTML")
+            await bot.edit_message_text(chat_id=chat_id, message_id=progress_msg_id, text=status, parse_mode="HTML")
         except Exception as e:
             logger.warning(f"Ошибка обновления прогресса: {e}")
 
@@ -369,14 +354,12 @@ async def mailing_task(vk_token: str, recipients: List[Dict], text: str, delay: 
     total_time = time.time() - start_time
     success_rate = (sent_ok / total * 100) if total > 0 else 0
     final_text = (
-        f"<tg-emoji emoji-id='5206401524200145033'></tg-emoji> <b>Рассылка завершена!</b>\n\n"
+        f"<tg-emoji emoji-id='5206401524200145033'></tg-emoji> <b>Рассылка друзьям завершена!</b>\n\n"
         f"📝 Отправлено: {sent_ok}/{total}\n"
         f"   ┣ <tg-emoji emoji-id='5206401524200145033'></tg-emoji> Успешно: {sent_ok}\n"
         f"   ┗ <tg-emoji emoji-id='5206510891247371052'></tg-emoji> Ошибки: {sent_err}\n"
         f"{'✅' if success_rate >= 70 else '⚠️'} Успешность: {success_rate:.1f}%\n"
-        f"⏲️ Время: {total_time:.1f} сек.\n\n"
-        f"👤 Аккаунт: {user_info.get('first_name')} {user_info.get('last_name')}\n"
-        f"📂 Всего чатов: {stats['total']} (бесед: {stats['dialogues']}, личных: {stats['contacts']}, групп: {stats['groups']})"
+        f"⏲️ Время: {total_time:.1f} сек."
     )
     await bot.send_message(chat_id, final_text, parse_mode="HTML")
     await bot.delete_message(chat_id, progress_msg_id)
@@ -386,19 +369,15 @@ async def mailing_task(vk_token: str, recipients: List[Dict], text: str, delay: 
 
 # ---------------------- Функция проверки токена для массовой валидации ----------------------
 async def check_token_valid(token: str):
-    """Выбрасывает исключение, если токен невалиден"""
-    vk_session = create_vk_session(token)
-    vk = vk_session.get_api()
-    # Проверяем получение информации и прав на чтение диалогов
-    vk.account.getProfileInfo()
-    vk.messages.getConversations(count=1)
+    valid, msg, _, _ = await asyncio.to_thread(validate_vk_token_strong, token)
+    if not valid:
+        raise Exception(msg)
 
 
 # ---------------------- FSM ----------------------
 class BotStates(StatesGroup):
     waiting_vk_token = State()
     waiting_mass_tokens = State()
-    waiting_group_filter = State()
     waiting_newsletter_text = State()
     waiting_delay = State()
     waiting_template_name = State()
@@ -430,7 +409,7 @@ async def check_channel(user_id: int) -> bool:
 # ---------------------- Клавиатуры ----------------------
 def main_menu(uid: int) -> InlineKeyboardMarkup:
     buttons = [
-        [InlineKeyboardButton(text="📨 Начать рассылку", callback_data="start_mailing",
+        [InlineKeyboardButton(text="📨 Начать рассылку (только друзьям)", callback_data="start_mailing",
                               icon_custom_emoji_id="5472096095280572227", style="primary")],
         [InlineKeyboardButton(text="🔍 Мои аккаунты VK", callback_data="check_vk",
                               icon_custom_emoji_id="5472096095280572227", style="default")],
@@ -438,6 +417,8 @@ def main_menu(uid: int) -> InlineKeyboardMarkup:
                               icon_custom_emoji_id="5472096095280572227", style="primary")],
         [InlineKeyboardButton(text="➕ Массовое добавление", callback_data="mass_add_tokens",
                               icon_custom_emoji_id="5472096095280572227", style="default")],
+        [InlineKeyboardButton(text="📱 Войти по номеру", callback_data="phone_login",
+                              icon_custom_emoji_id="5472096095280572227", style="primary")],
         [InlineKeyboardButton(text="📝 Мои шаблоны", callback_data="my_templates",
                               icon_custom_emoji_id="5275979556308674886", style="primary")],
         [InlineKeyboardButton(text="👤 Мой профиль", callback_data="my_profile",
@@ -467,16 +448,17 @@ async def cmd_start(message: Message, state: FSMContext):
         await message.answer(f"❌ Подпишитесь на канал {REQUIRED_CHANNEL} и нажмите /start снова.")
         return
     welcome = ("<tg-emoji emoji-id='5278611606756942667'></tg-emoji> <b>VK Рассыльщик</b>\n\n"
-               "🔑 Добавьте токены VK через кнопки ниже.\n"
-               "💰 Купите подписку для доступа.")
+               "🔑 Добавьте токены VK или войдите по номеру телефона.\n"
+               "💰 Купите подписку для доступа.\n"
+               "📨 Рассылка идёт ТОЛЬКО в личные сообщения (друзьям).")
     await message.answer(welcome, parse_mode="HTML", reply_markup=main_menu(uid))
 
 
-# ---- Добавление одного токена (проверка через validate_vk_token) ----
+# ---- Добавление токена ----
 @dp.callback_query(lambda c: c.data == "add_token")
 async def add_token_prompt(callback: CallbackQuery, state: FSMContext):
     if not await check_subscription(callback.from_user.id):
-        await callback.answer("❌ Нет активной подписки! Купите через кнопку 💰 Купить подписку.", show_alert=True)
+        await callback.answer("❌ Нет активной подписки!", show_alert=True)
         return
     await callback.answer()
     await callback.message.edit_text(
@@ -492,8 +474,8 @@ async def process_single_token(message: Message, state: FSMContext):
         await message.answer("❌ Токен не может быть пустым.")
         return
     uid = message.from_user.id
-    msg = await message.answer("🔄 Проверка токена...")
-    valid, error_msg, user_info, stats = await asyncio.to_thread(validate_vk_token, token)
+    msg = await message.answer("🔄 Жёсткая проверка токена...")
+    valid, error_msg, user_info, stats = await asyncio.to_thread(validate_vk_token_strong, token)
     if not valid:
         await msg.delete()
         await message.answer(f"<tg-emoji emoji-id='5276240711795107620'></tg-emoji> <b>Ошибка:</b> {error_msg}",
@@ -508,15 +490,15 @@ async def process_single_token(message: Message, state: FSMContext):
     await state.clear()
 
 
-# ---- Массовое добавление токенов (проверка через validate_vk_token) ----
+# ---- Массовое добавление ----
 @dp.callback_query(lambda c: c.data == "mass_add_tokens")
 async def mass_add_prompt(callback: CallbackQuery, state: FSMContext):
     if not await check_subscription(callback.from_user.id):
-        await callback.answer("❌ Нет активной подписки! Купите через кнопку 💰 Купить подписку.", show_alert=True)
+        await callback.answer("❌ Нет активной подписки!", show_alert=True)
         return
     await callback.answer()
     await callback.message.edit_text(
-        "📦 Отправьте список токенов в формате:\n\n`токен1 | Название1`\n`токен2 | Название2`\n\nПример:\nvk1... | Мой основной\nvk2...\n\nТокены будут проверены и добавлены.",
+        "📦 Отправьте список токенов в формате:\n\n`токен1 | Название1`\n`токен2 | Название2`\n\nТокены будут проверены и добавлены.",
         parse_mode="Markdown", reply_markup=None)
     await state.set_state(BotStates.waiting_mass_tokens)
 
@@ -534,7 +516,7 @@ async def process_mass_tokens(message: Message, state: FSMContext):
         parts = line.split('|')
         token = parts[0].strip()
         name = parts[1].strip() if len(parts) > 1 else None
-        valid, error_msg, user_info, _ = await asyncio.to_thread(validate_vk_token, token)
+        valid, error_msg, user_info, _ = await asyncio.to_thread(validate_vk_token_strong, token)
         if not valid:
             await message.answer(
                 f"<tg-emoji emoji-id='5276240711795107620'></tg-emoji> Ошибка для {token[:10]}...: {error_msg}",
@@ -555,13 +537,14 @@ async def process_mass_tokens(message: Message, state: FSMContext):
 @dp.callback_query(lambda c: c.data == "check_vk")
 async def list_accounts(callback: CallbackQuery):
     if not await check_subscription(callback.from_user.id):
-        await callback.answer("❌ Нет активной подписки! Купите через кнопку 💰 Купить подписку.", show_alert=True)
+        await callback.answer("❌ Нет активной подписки!", show_alert=True)
         return
     await callback.answer()
     uid = callback.from_user.id
     tokens = await get_user_tokens(uid)
     if not tokens:
-        await callback.message.edit_text("❌ Нет аккаунтов. Нажмите «➕ Добавить токен».", reply_markup=back_button())
+        await callback.message.edit_text("❌ Нет аккаунтов. Нажмите «➕ Добавить токен» или «📱 Войти по номеру».",
+                                         reply_markup=back_button())
         return
     text = "<tg-emoji emoji-id='5472096095280572227'></tg-emoji> <b>Ваши аккаунты VK</b>\n\n"
     kb = InlineKeyboardMarkup(inline_keyboard=[])
@@ -580,7 +563,6 @@ async def list_accounts(callback: CallbackQuery):
     await callback.message.edit_text(text, parse_mode="HTML", reply_markup=kb)
 
 
-# ---- Проверка всех токенов и удаление невалидных ----
 @dp.callback_query(lambda c: c.data == "validate_all_tokens")
 async def validate_all_tokens_cmd(callback: CallbackQuery):
     await callback.answer()
@@ -592,7 +574,6 @@ async def validate_all_tokens_cmd(callback: CallbackQuery):
         reply_markup=back_button("check_vk"))
 
 
-# ---- Активация токена ----
 @dp.callback_query(lambda c: c.data.startswith("activate_token_"))
 async def activate_token(callback: CallbackQuery):
     token_id = int(callback.data.split("_")[2])
@@ -602,7 +583,6 @@ async def activate_token(callback: CallbackQuery):
     await list_accounts(callback)
 
 
-# ---- Удаление токена ----
 @dp.callback_query(lambda c: c.data == "delete_account_menu")
 async def delete_account_menu(callback: CallbackQuery):
     uid = callback.from_user.id
@@ -676,7 +656,7 @@ async def check_payment_callback(callback: CallbackQuery):
         await callback.answer("⏳ Оплата не найдена", show_alert=True)
 
 
-# ---- Рассылка (использует активный аккаунт, проверяет подписку) ----
+# ---- РАССЫЛКА ТОЛЬКО ДРУЗЬЯМ (упрощённая) ----
 @dp.callback_query(lambda c: c.data == "start_mailing")
 async def start_newsletter(callback: CallbackQuery, state: FSMContext):
     await callback.answer()
@@ -689,116 +669,30 @@ async def start_newsletter(callback: CallbackQuery, state: FSMContext):
         await callback.message.edit_text("❌ Нет активного аккаунта. Добавьте и активируйте через «🔍 Мои аккаунты VK».",
                                          reply_markup=back_button())
         return
-    # Проверяем валидность активного токена перед началом
-    valid, error_msg, user_info, _ = await asyncio.to_thread(validate_vk_token, active['token'])
+    # Проверяем валидность активного токена
+    valid, error_msg, user_info, _ = await asyncio.to_thread(validate_vk_token_strong, active['token'])
     if not valid:
         await callback.message.edit_text(
             f"<tg-emoji emoji-id='5276240711795107620'></tg-emoji> Активный токен невалиден: {error_msg}\nАктивируйте другой или добавьте новый.",
             parse_mode="HTML", reply_markup=back_button())
         return
-    # Получаем полную статистику диалогов для активного токена
+    # Загружаем ТОЛЬКО друзей (личные диалоги)
     try:
         vk_session = create_vk_session(active['token'])
         vk = vk_session.get_api()
-        recipients, stats = await asyncio.to_thread(get_recipients_from_token, vk, None)
+        recipients, stats = await asyncio.to_thread(get_recipients_from_token, vk, None, only_friends=True)
     except Exception as e:
-        await callback.message.edit_text(f"❌ Ошибка загрузки диалогов: {e}", reply_markup=back_button())
+        await callback.message.edit_text(f"❌ Ошибка загрузки друзей: {e}", reply_markup=back_button())
         return
     if not recipients:
-        await callback.message.edit_text("⚠️ Нет доступных диалогов для рассылки.", reply_markup=back_button())
+        await callback.message.edit_text("⚠️ У вас нет друзей в списке диалогов (или они запретили сообщения).",
+                                         reply_markup=back_button())
         return
     await state.update_data(vk_token=active['token'], token_name=active['name'], recipients=recipients,
                             user_info=user_info, stats=stats)
-    kb = InlineKeyboardMarkup(
-        inline_keyboard=[[InlineKeyboardButton(text="🚫 Пропустить", callback_data="skip_filter", style="default")]])
-    await callback.message.edit_text("📌 Введите название беседы для фильтра (или нажмите «Пропустить»):",
-                                     parse_mode="HTML", reply_markup=kb)
-    await state.set_state(BotStates.waiting_group_filter)
-
-
-@dp.callback_query(lambda c: c.data == "skip_filter", StateFilter(BotStates.waiting_group_filter))
-async def skip_filter(callback: CallbackQuery, state: FSMContext):
-    await callback.answer()
-    await state.update_data(group_filter=None)
-    await proceed_load(callback.message, state, callback)
-
-
-@dp.message(BotStates.waiting_group_filter)
-async def process_group_filter(message: Message, state: FSMContext):
-    group_name = message.text.strip()
-    if group_name.lower() == "пропустить":
-        group_name = None
-    await state.update_data(group_filter=group_name)
-    await proceed_load(message, state)
-
-
-async def proceed_load(target: Message, state: FSMContext, callback: CallbackQuery = None):
-    data = await state.get_data()
-    token = data.get("vk_token")
-    group_filter = data.get("group_filter")
-    user_info = data.get("user_info")
-    if callback:
-        await callback.message.edit_text("🔄 Фильтрация диалогов...", reply_markup=None)
-    else:
-        await target.answer("🔄 Фильтрация диалогов...")
-    # Загружаем отфильтрованных получателей
-    try:
-        vk_session = create_vk_session(token)
-        vk = vk_session.get_api()
-        recipients, stats = await asyncio.to_thread(get_recipients_from_token, vk, None, group_filter)
-    except Exception as e:
-        await target.answer(f"❌ Ошибка загрузки диалогов: {e}", reply_markup=back_button())
-        return
-    if not recipients:
-        await target.answer("⚠️ Нет диалогов, соответствующих критериям.", reply_markup=back_button())
-        return
-    await state.update_data(recipients=recipients, stats=stats)
-    templates = await get_templates(target.from_user.id)
-    if templates:
-        kb = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="📝 Шаблон", callback_data="use_template", style="primary")],
-            [InlineKeyboardButton(text="✏️ Вручную", callback_data="manual_text", style="default")],
-            [InlineKeyboardButton(text="◀️ Назад", callback_data="back_to_main", style="default")]
-        ])
-        await target.answer("Выберите способ ввода текста:", reply_markup=kb)
-    else:
-        await target.answer("✏️ Введите текст рассылки (HTML):", reply_markup=None)
-        await state.set_state(BotStates.waiting_newsletter_text)
-
-
-@dp.callback_query(lambda c: c.data == "use_template")
-async def use_template(callback: CallbackQuery, state: FSMContext):
-    await callback.answer()
-    uid = callback.from_user.id
-    templates = await get_templates(uid)
-    if not templates:
-        await callback.message.edit_text("📭 Нет шаблонов.", reply_markup=back_button())
-        return
-    kb = InlineKeyboardMarkup(inline_keyboard=[])
-    for tpl in templates:
-        kb.inline_keyboard.append(
-            [InlineKeyboardButton(text=f"📄 {tpl['name']} ({tpl['delay']}c)", callback_data=f"tpl_{tpl['id']}",
-                                  style="default")])
-    kb.inline_keyboard.append([InlineKeyboardButton(text="◀️ Назад", callback_data="start_mailing", style="default")])
-    await callback.message.edit_text("📋 Выберите шаблон:", reply_markup=kb)
-
-
-@dp.callback_query(lambda c: c.data.startswith("tpl_"))
-async def apply_template(callback: CallbackQuery, state: FSMContext):
-    tpl_id = int(callback.data.split("_")[1])
-    tpl = await get_template_by_id(tpl_id, callback.from_user.id)
-    if not tpl:
-        await callback.answer("❌ Шаблон не найден", show_alert=True)
-        return
-    await callback.answer()
-    await state.update_data(newsletter_text=tpl["content"], delay=tpl["delay"])
-    await start_mailing(callback.message, state, callback)
-
-
-@dp.callback_query(lambda c: c.data == "manual_text")
-async def manual_text(callback: CallbackQuery, state: FSMContext):
-    await callback.answer()
-    await callback.message.edit_text("✏️ Введите текст рассылки (HTML):", reply_markup=None)
+    # Сразу переходим к вводу текста (без фильтра)
+    await callback.message.edit_text("✏️ Введите текст рассылки для ваших друзей (можно использовать HTML):",
+                                     parse_mode="HTML", reply_markup=None)
     await state.set_state(BotStates.waiting_newsletter_text)
 
 
@@ -808,7 +702,7 @@ async def process_newsletter_text(message: Message, state: FSMContext):
     if "delay" in await state.get_data():
         await start_mailing(message, state)
     else:
-        await message.answer("⏱ Задержка (сек):", reply_markup=None)
+        await message.answer("⏱ Введите задержку в секундах (например, 2):", reply_markup=None)
         await state.set_state(BotStates.waiting_delay)
 
 
@@ -838,7 +732,7 @@ async def start_mailing(message: Message, state: FSMContext, callback: CallbackQ
         await message.answer("❌ Ошибка данных.", reply_markup=main_menu(message.from_user.id))
         await state.clear()
         return
-    progress_msg = await message.answer("⏳ Запуск рассылки...")
+    progress_msg = await message.answer("⏳ Запуск рассылки друзьям...")
     if callback:
         await callback.message.delete()
     await state.clear()
@@ -851,7 +745,7 @@ async def start_mailing(message: Message, state: FSMContext, callback: CallbackQ
 @dp.callback_query(lambda c: c.data == "my_templates")
 async def templates_menu(callback: CallbackQuery):
     if not await check_subscription(callback.from_user.id):
-        await callback.answer("❌ Нет активной подписки! Купите через кнопку 💰 Купить подписку.", show_alert=True)
+        await callback.answer("❌ Нет активной подписки!", show_alert=True)
         return
     await callback.answer()
     uid = callback.from_user.id
