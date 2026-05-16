@@ -23,7 +23,7 @@ from requests.adapters import HTTPAdapter
 from urllib3.poolmanager import PoolManager
 
 # Импорт из БД (упрощённая версия – только один токен на пользователя)
-from database import ( 
+from database import (
     init_db, add_user, get_user, get_user_subscription, set_subscription,
     revoke_subscription, save_vk_token, get_vk_token, get_all_users,
     get_bot_stats, save_mailing_stats, get_mailing_stats, get_user_mailing_stats,
@@ -388,17 +388,17 @@ async def check_channel(user_id: int) -> bool:
 # ---------------------- Клавиатуры ----------------------
 def main_menu(uid: int) -> InlineKeyboardMarkup:
     buttons = [
-        [InlineKeyboardButton(text="📨 Начать рассылку", callback_data="start_mailing",
+        [InlineKeyboardButton(text=" Начать рассылку", callback_data="start_mailing",
                               icon_custom_emoji_id="5472096095280572227", style="primary")],
-        [InlineKeyboardButton(text="🔑 Ввести токен VK", callback_data="enter_token",
+        [InlineKeyboardButton(text=" Ввести токен VK", callback_data="enter_token",
                               icon_custom_emoji_id="5472096095280572227", style="primary")],
-        [InlineKeyboardButton(text="📝 Мои шаблоны", callback_data="my_templates",
+        [InlineKeyboardButton(text=" Мои шаблоны", callback_data="my_templates",
                               icon_custom_emoji_id="5275979556308674886", style="primary")],
-        [InlineKeyboardButton(text="👤 Мой профиль", callback_data="my_profile",
+        [InlineKeyboardButton(text=" Мой профиль", callback_data="my_profile",
                               icon_custom_emoji_id="5275979556308674886", style="primary")],
-        [InlineKeyboardButton(text="📊 Моя статистика", callback_data="my_stats",
+        [InlineKeyboardButton(text=" Моя статистика", callback_data="my_stats",
                               icon_custom_emoji_id="5278753302023004775", style="primary")],
-        [InlineKeyboardButton(text="💰 Купить подписку", callback_data="buy_sub",
+        [InlineKeyboardButton(text=" Купить подписку", callback_data="buy_sub",
                               icon_custom_emoji_id="5195058841988914267", style="success")],
     ]
     if uid in ADMIN_IDS:
