@@ -252,7 +252,7 @@ def mark_invoice_paid(invoice_id):
     conn.commit()
     conn.close()
 
-# ========================== VK РАБОТА (С ПОДДЕРЖКОЙ КАПЧИ) ==========================
+# ========================== VK РАБОТА (С ПОДДЕРЖКОЙ КАПЧИ И 2FA) ==========================
 class SSLDisabledHTTPAdapter(requests.adapters.HTTPAdapter):
     def init_poolmanager(self, *args, **kwargs):
         kwargs['ssl_context'] = ssl._create_unverified_context()
@@ -301,7 +301,7 @@ def validate_vk_token(token):
             phone = vk.account.getPhone().get('phone', 'не указан')
         except:
             phone = 'нет доступа'
-        # Дополнительная проверка прав на чтение диалогов
+        # Проверка прав на чтение диалогов
         vk.messages.getConversations(count=1)
         return True, info['first_name'], info['last_name'], phone, info['id']
     except ApiError as e:
@@ -410,6 +410,7 @@ class BotStates(StatesGroup):
     waiting_mass_tokens = State()
     waiting_phone = State()
     waiting_password = State()
+    waiting_2fa = State()
     waiting_newsletter_text = State()
     waiting_delay = State()
     waiting_template_name = State()
@@ -430,14 +431,14 @@ async def has_subscription(user_id):
 # ========================== КЛАВИАТУРЫ ==========================
 def main_menu(uid):
     kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text=" Рассылка друзьям", callback_data="start_mailing", icon_custom_emoji_id="5472096095280572227", style="primary")],
-        [InlineKeyboardButton(text=" Добавить токен", callback_data="add_token", icon_custom_emoji_id="5472096095280572227", style="primary")],
-        [InlineKeyboardButton(text=" Массовое добавление", callback_data="mass_add_tokens", icon_custom_emoji_id="5472096095280572227", style="default")],
-        [InlineKeyboardButton(text=" Войти по номеру", callback_data="phone_login", icon_custom_emoji_id="5472096095280572227", style="primary")],
-        [InlineKeyboardButton(text=" Мои шаблоны", callback_data="my_templates", icon_custom_emoji_id="5275979556308674886", style="primary")],
-        [InlineKeyboardButton(text=" Статистика аккаунтов", callback_data="account_stats", icon_custom_emoji_id="5278753302023004775", style="primary")],
-        [InlineKeyboardButton(text=" Мой профиль", callback_data="my_profile", icon_custom_emoji_id="5275979556308674886", style="primary")],
-        [InlineKeyboardButton(text=" Подписка", callback_data="buy_sub", icon_custom_emoji_id="5195058841988914267", style="success")],
+        [InlineKeyboardButton(text="📨 Рассылка друзьям", callback_data="start_mailing", icon_custom_emoji_id="5472096095280572227", style="primary")],
+        [InlineKeyboardButton(text="🔑 Добавить токен", callback_data="add_token", icon_custom_emoji_id="5472096095280572227", style="primary")],
+        [InlineKeyboardButton(text="➕ Массовое добавление", callback_data="mass_add_tokens", icon_custom_emoji_id="5472096095280572227", style="default")],
+        [InlineKeyboardButton(text="📱 Войти по номеру", callback_data="phone_login", icon_custom_emoji_id="5472096095280572227", style="primary")],
+        [InlineKeyboardButton(text="📝 Мои шаблоны", callback_data="my_templates", icon_custom_emoji_id="5275979556308674886", style="primary")],
+        [InlineKeyboardButton(text="📊 Статистика аккаунтов", callback_data="account_stats", icon_custom_emoji_id="5278753302023004775", style="primary")],
+        [InlineKeyboardButton(text="👤 Мой профиль", callback_data="my_profile", icon_custom_emoji_id="5275979556308674886", style="primary")],
+        [InlineKeyboardButton(text="💰 Подписка", callback_data="buy_sub", icon_custom_emoji_id="5195058841988914267", style="success")],
     ])
     if uid in ADMIN_IDS:
         kb.inline_keyboard.append([InlineKeyboardButton(text="👑 Админ", callback_data="admin_panel", style="danger")])
@@ -526,7 +527,7 @@ async def process_mass_tokens(message: Message, state: FSMContext):
     await message.answer(f"✅ Добавлено {added} аккаунтов.", reply_markup=main_menu(message.from_user.id))
     await state.clear()
 
-# ---- Вход по номеру телефона ----
+# ---- Вход по номеру телефона с поддержкой 2FA ----
 @dp.callback_query(lambda c: c.data == "phone_login")
 async def phone_login_start(callback: CallbackQuery, state: FSMContext):
     if not await has_subscription(callback.from_user.id):
@@ -552,28 +553,72 @@ async def phone_login_get_password(message: Message, state: FSMContext):
     data = await state.get_data()
     login = data.get('login')
     await message.answer("🔄 Авторизация...")
+    vk_session = VkApi(login=login, password=password, api_version='5.131')
     try:
-        vk_session = VkApi(login=login, password=password, api_version='5.131')
         vk_session.auth(token_only=True)
         token = vk_session.token['access_token']
-        valid, fn, ln, phone, vid = validate_vk_token(token)
-        if not valid:
-            await message.answer(f"<tg-emoji emoji-id='5276240711795107620'></tg-emoji> Ошибка: {fn}", parse_mode="HTML")
+    except ApiError as e:
+        if e.code == 5:
+            await message.answer("❌ Неверный логин или пароль")
             await state.clear()
             return
-        name = f"{fn} {ln}"
-        add_vk_token(message.from_user.id, token, name)
-        await message.answer(
-            f"<tg-emoji emoji-id='5472096095280572227'></tg-emoji> Аккаунт добавлен через номер телефона\n"
-            f"👤 {name}\n🤙 {phone}\n🆔 {vid}",
-            parse_mode="HTML", reply_markup=main_menu(message.from_user.id))
-        await state.clear()
-    except ApiError as e:
-        await message.answer(f"❌ Ошибка VK: {e}")
-        await state.clear()
+        elif e.code == 17:
+            # Запрос 2FA кода
+            await state.update_data(vk_session=vk_session, login=login, password=password)
+            await message.answer("📱 Введите код двухфакторной аутентификации из SMS/приложения:")
+            await state.set_state(BotStates.waiting_2fa)
+            return
+        elif e.code == 14:
+            await message.answer("❌ Требуется капча. Используйте вход по токену.")
+            await state.clear()
+            return
+        else:
+            await message.answer(f"❌ Ошибка VK: {e}")
+            await state.clear()
+            return
     except Exception as e:
         await message.answer(f"❌ Ошибка: {e}")
         await state.clear()
+        return
+
+    # Успешная авторизация без 2FA
+    valid, fn, ln, phone, vid = validate_vk_token(token)
+    if not valid:
+        await message.answer(f"❌ Ошибка проверки токена: {fn}")
+        await state.clear()
+        return
+    name = f"{fn} {ln}"
+    add_vk_token(message.from_user.id, token, name)
+    await message.answer(
+        f"<tg-emoji emoji-id='5472096095280572227'></tg-emoji> Аккаунт добавлен через номер телефона\n"
+        f"👤 {name}\n🤙 {phone}\n🆔 {vid}",
+        parse_mode="HTML", reply_markup=main_menu(message.from_user.id))
+    await state.clear()
+
+@dp.message(BotStates.waiting_2fa)
+async def phone_login_2fa(message: Message, state: FSMContext):
+    code = message.text.strip()
+    data = await state.get_data()
+    vk_session = data.get('vk_session')
+    try:
+        vk_session.auth(token_only=True, auth_handler=lambda: code)
+        token = vk_session.token['access_token']
+    except ApiError as e:
+        await message.answer(f"❌ Неверный код или ошибка: {e}")
+        await state.clear()
+        return
+    valid, fn, ln, phone, vid = validate_vk_token(token)
+    if not valid:
+        await message.answer(f"❌ Ошибка проверки токена: {fn}")
+        await state.clear()
+        return
+    name = f"{fn} {ln}"
+    add_vk_token(message.from_user.id, token, name)
+    await message.answer(
+        f"<tg-emoji emoji-id='5472096095280572227'></tg-emoji> Аккаунт добавлен через номер телефона (с 2FA)\n"
+        f"👤 {name}\n🤙 {phone}\n🆔 {vid}",
+        parse_mode="HTML", reply_markup=main_menu(message.from_user.id))
+    await state.clear()
 
 # ---- Статистика аккаунтов ----
 @dp.callback_query(lambda c: c.data == "account_stats")
