@@ -414,13 +414,12 @@ async def cmd_start(message: Message, state: FSMContext):
         await message.answer(f"❌ Подпишитесь на канал {REQUIRED_CHANNEL} и нажмите /start снова.")
         return
     welcome = (
-        f"<tg-emoji emoji-id='5278611606756942667'></tg-emoji> <b>Добро пожаловать в VK Рассыльщик!</b>\n\n"
-        f"🤖 Я помогу вам отправлять сообщения в личные диалоги и беседы ВКонтакте.\n\n"
+        f"<tg-emoji emoji-id='5278611606756942667'></tg-emoji> <b>салам алекум молодой!</b>\n\n"
+        f"🤖 Я помогу тебе рассылать в вк сообщения.\n\n"
         f"📌 <b>Что нужно сделать:</b>\n"
         f"1️⃣ Пополнить баланс через кнопку <b>💰 Купить подписку</b>\n"
         f"2️⃣ Ввести токен ВК через кнопку <b><tg-emoji emoji-id='5472096095280572227'></tg-emoji> Ввести токен VK</b>\n"
         f"3️⃣ Нажать <b>📨 Начать рассылку</b>\n\n"
-        f"💡 Также доступны шаблоны сообщений, статистика.\n"
         f"⚡️ Для получения токена VK используйте: https://vkhost.github.io"
     )
     await message.answer(welcome, parse_mode="HTML", reply_markup=main_menu(uid))
