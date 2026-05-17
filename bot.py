@@ -6,7 +6,6 @@ import time
 import random
 import asyncio
 import logging
-import sqlite3
 import requests
 import base64
 import ssl
@@ -22,6 +21,16 @@ from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, Message, C
 from aiogram import F
 from vk_api import VkApi
 from vk_api.exceptions import ApiError
+
+# Импорт функций из database.py
+from database import (
+    init_db, add_user, get_user_subscription, set_subscription,
+    add_vk_token, update_token_stats, get_all_tokens, set_active_token,
+    delete_token, get_active_token, get_all_user_stats,
+    save_template, get_templates, delete_template, export_templates_json, import_templates_json,
+    create_invoice, get_pending_invoice, mark_invoice_paid,
+    get_all_users, get_bot_stats
+)
 
 load_dotenv()
 BOT_TOKEN = os.getenv("BOT_TOKEN")
@@ -40,219 +49,7 @@ bot = Bot(token=BOT_TOKEN)
 storage = MemoryStorage()
 dp = Dispatcher(storage=storage)
 
-# ========================== БАЗА ДАННЫХ ==========================
-DB_PATH = "bot_database.db"
-
-def init_db():
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    c.execute('''CREATE TABLE IF NOT EXISTS users (
-        telegram_id INTEGER PRIMARY KEY,
-        username TEXT,
-        first_name TEXT,
-        subscription_until TIMESTAMP,
-        joined_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-    )''')
-    c.execute('''CREATE TABLE IF NOT EXISTS vk_tokens (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        user_id INTEGER,
-        token TEXT NOT NULL,
-        name TEXT,
-        is_active INTEGER DEFAULT 0,
-        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-        last_checked TIMESTAMP,
-        stats TEXT DEFAULT '{}'
-    )''')
-    c.execute('''CREATE TABLE IF NOT EXISTS templates (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        user_id INTEGER,
-        name TEXT,
-        content TEXT,
-        delay REAL DEFAULT 3.0,
-        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-    )''')
-    c.execute('''CREATE TABLE IF NOT EXISTS invoices (
-        invoice_id TEXT PRIMARY KEY,
-        user_id INTEGER,
-        days INTEGER,
-        status TEXT DEFAULT 'pending',
-        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-    )''')
-    conn.commit()
-    conn.close()
-
-def add_user(telegram_id, username=None, first_name=None):
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    c.execute('INSERT OR IGNORE INTO users (telegram_id, username, first_name) VALUES (?, ?, ?)',
-              (telegram_id, username, first_name))
-    c.execute('UPDATE users SET username=?, first_name=? WHERE telegram_id=?',
-              (username, first_name, telegram_id))
-    conn.commit()
-    conn.close()
-
-def get_user_subscription(telegram_id):
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    c.execute('SELECT subscription_until FROM users WHERE telegram_id=?', (telegram_id,))
-    row = c.fetchone()
-    conn.close()
-    if row and row[0]:
-        return datetime.fromisoformat(row[0])
-    return None
-
-def set_subscription(telegram_id, days):
-    until = datetime.now() + timedelta(days=days)
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    c.execute('UPDATE users SET subscription_until=? WHERE telegram_id=?', (until.isoformat(), telegram_id))
-    conn.commit()
-    conn.close()
-
-# ---------- Токены ----------
-def add_vk_token(user_id, token, name):
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    c.execute('INSERT INTO vk_tokens (user_id, token, name, is_active, last_checked) VALUES (?, ?, ?, 0, ?)',
-              (user_id, token, name, datetime.now().isoformat()))
-    token_id = c.lastrowid
-    c.execute('UPDATE vk_tokens SET stats = ? WHERE id=?', ('{}', token_id))
-    conn.commit()
-    conn.close()
-    return token_id
-
-def update_token_stats(token_id, sent=0, errors=0):
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    c.execute('SELECT stats FROM vk_tokens WHERE id=?', (token_id,))
-    row = c.fetchone()
-    if row:
-        stats = json.loads(row[0]) if row[0] else {}
-        stats['sent'] = stats.get('sent', 0) + sent
-        stats['errors'] = stats.get('errors', 0) + errors
-        stats['last_used'] = datetime.now().isoformat()
-        c.execute('UPDATE vk_tokens SET stats=? WHERE id=?', (json.dumps(stats), token_id))
-    conn.commit()
-    conn.close()
-
-def get_token_stats(token_id):
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    c.execute('SELECT stats FROM vk_tokens WHERE id=?', (token_id,))
-    row = c.fetchone()
-    conn.close()
-    return json.loads(row[0]) if row and row[0] else {}
-
-def get_all_tokens(user_id):
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    c.execute('SELECT id, token, name, is_active FROM vk_tokens WHERE user_id=?', (user_id,))
-    rows = c.fetchall()
-    conn.close()
-    return rows
-
-def set_active_token(user_id, token_id):
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    c.execute('UPDATE vk_tokens SET is_active=0 WHERE user_id=?', (user_id,))
-    c.execute('UPDATE vk_tokens SET is_active=1 WHERE id=? AND user_id=?', (token_id, user_id))
-    conn.commit()
-    conn.close()
-
-def delete_token(user_id, token_id):
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    c.execute('DELETE FROM vk_tokens WHERE id=? AND user_id=?', (token_id, user_id))
-    conn.commit()
-    conn.close()
-
-def get_active_token(user_id):
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    c.execute('SELECT id, token, name FROM vk_tokens WHERE user_id=? AND is_active=1', (user_id,))
-    row = c.fetchone()
-    conn.close()
-    return row
-
-def get_all_user_stats(user_id):
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    c.execute('SELECT id, name, stats, is_active FROM vk_tokens WHERE user_id=?', (user_id,))
-    rows = c.fetchall()
-    conn.close()
-    result = []
-    for token_id, name, stats_json, is_active in rows:
-        stats = json.loads(stats_json) if stats_json else {}
-        result.append({
-            'id': token_id,
-            'name': name,
-            'sent': stats.get('sent', 0),
-            'errors': stats.get('errors', 0),
-            'last_used': stats.get('last_used', 'никогда'),
-            'is_active': is_active
-        })
-    return result
-
-# ---------- Шаблоны ----------
-def save_template(user_id, name, content, delay):
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    c.execute('INSERT INTO templates (user_id, name, content, delay) VALUES (?, ?, ?, ?)',
-              (user_id, name, content, delay))
-    conn.commit()
-    conn.close()
-
-def get_templates(user_id):
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    c.execute('SELECT id, name, content, delay FROM templates WHERE user_id=? ORDER BY created_at DESC', (user_id,))
-    rows = c.fetchall()
-    conn.close()
-    return rows
-
-def delete_template(template_id, user_id):
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    c.execute('DELETE FROM templates WHERE id=? AND user_id=?', (template_id, user_id))
-    conn.commit()
-    conn.close()
-
-def export_templates_json(user_id):
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    c.execute('SELECT name, content, delay FROM templates WHERE user_id=?', (user_id,))
-    rows = c.fetchall()
-    conn.close()
-    return [{'name': r[0], 'content': r[1], 'delay': r[2]} for r in rows]
-
-def import_templates_json(user_id, data):
-    for item in data:
-        save_template(user_id, item['name'], item['content'], item['delay'])
-
-# ---------- Оплата ----------
-def create_invoice(invoice_id, user_id, days):
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    c.execute('INSERT INTO invoices (invoice_id, user_id, days) VALUES (?, ?, ?)', (invoice_id, user_id, days))
-    conn.commit()
-    conn.close()
-
-def get_pending_invoice(user_id):
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    c.execute('SELECT invoice_id, days FROM invoices WHERE user_id=? AND status="pending" ORDER BY created_at DESC LIMIT 1', (user_id,))
-    row = c.fetchone()
-    conn.close()
-    return row
-
-def mark_invoice_paid(invoice_id):
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    c.execute('UPDATE invoices SET status="paid" WHERE invoice_id=?', (invoice_id,))
-    conn.commit()
-    conn.close()
-
-# ========================== VK РАБОТА (С ПОДДЕРЖКОЙ КАПЧИ И 2FA) ==========================
+# ========================== VK РАБОТА ==========================
 class SSLDisabledHTTPAdapter(requests.adapters.HTTPAdapter):
     def init_poolmanager(self, *args, **kwargs):
         kwargs['ssl_context'] = ssl._create_unverified_context()
@@ -301,7 +98,6 @@ def validate_vk_token(token):
             phone = vk.account.getPhone().get('phone', 'не указан')
         except:
             phone = 'нет доступа'
-        # Проверка прав на чтение диалогов
         vk.messages.getConversations(count=1)
         return True, info['first_name'], info['last_name'], phone, info['id']
     except ApiError as e:
@@ -314,12 +110,11 @@ def validate_vk_token(token):
         elif e.code == 14:
             return False, "Требуется капча", None, None, None
         else:
-            return False, f"Ошибка VK {e.code}: {e.error.get('error_msg', 'Неизвестная ошибка')}", None, None, None
+            return False, f"Ошибка VK {e.code}", None, None, None
     except Exception as e:
         return False, str(e), None, None, None
 
 def get_friends(token):
-    """Получает только личные диалоги (друзей) с правом отправки"""
     vk_session = create_vk_session(token)
     vk = vk_session.get_api()
     try:
@@ -332,18 +127,13 @@ def get_friends(token):
             can_write = item['conversation'].get('can_write', {}).get('allowed', False)
             if not can_write:
                 continue
-            dialogs.append({
-                'peer_id': peer['id'],
-                'name': f"User {peer['id']}"
-            })
+            dialogs.append({'peer_id': peer['id'], 'name': f"User {peer['id']}"})
         return dialogs
     except ApiError as e:
         if e.code == 14:
-            captcha_key = solve_captcha(e.captcha_img)
-            # Повторный запрос с капчей (упрощённо)
-            raise Exception("Капча была решена, повторите запрос")
-        else:
-            raise e
+            solve_captcha(e.captcha_img)
+            raise Exception("Капча решена, повторите запрос")
+        raise e
 
 def send_vk_message(token, peer_id, text):
     vk_session = create_vk_session(token)
@@ -374,21 +164,20 @@ def send_vk_message(token, peer_id, text):
 async def create_crypto_invoice(user_id, days, amount):
     if not CRYPTOBOT_TOKEN:
         return None
-    description = f"Subscription {days}d {amount} USDT"
-    params = {"amount": amount, "asset": "USDT", "description": description, "user_id": user_id}
+    params = {"amount": amount, "asset": "USDT", "description": f"Subscription {days}d {amount} USDT", "user_id": user_id}
     headers = {"Crypto-Pay-API-Token": CRYPTOBOT_TOKEN}
     try:
         resp = requests.post(CRYPTOBOT_API_URL + "createInvoice", json=params, headers=headers)
         data = resp.json()
         if data.get("ok"):
             invoice_id = str(data["result"]["invoice_id"])
-            create_invoice(invoice_id, user_id, days)
+            await create_invoice(invoice_id, user_id, days)
             return data["result"]["pay_url"]
     except:
         return None
 
 async def check_payment(user_id):
-    inv = get_pending_invoice(user_id)
+    inv = await get_pending_invoice(user_id)
     if not inv:
         return False
     invoice_id, days = inv
@@ -397,12 +186,38 @@ async def check_payment(user_id):
         resp = requests.post(CRYPTOBOT_API_URL + "getInvoices", json={"invoice_ids": invoice_id}, headers=headers)
         data = resp.json()
         if data.get("ok") and data["result"]["items"] and data["result"]["items"][0]["status"] == "paid":
-            mark_invoice_paid(invoice_id)
-            set_subscription(user_id, days)
+            await mark_invoice_paid(invoice_id)
+            await set_subscription(user_id, days)
             return True
     except:
         pass
     return False
+
+# ========================== ПРОВЕРКА ПОДПИСКИ ==========================
+async def has_subscription(user_id):
+    if user_id in ADMIN_IDS:
+        return True
+    sub = await get_user_subscription(user_id)
+    return sub and sub > datetime.now()
+
+# ========================== КЛАВИАТУРЫ ==========================
+def main_menu(uid):
+    buttons = [
+        [InlineKeyboardButton(text="📨 Рассылка друзьям", callback_data="start_mailing", icon_custom_emoji_id="5472096095280572227", style="primary")],
+        [InlineKeyboardButton(text="🔑 Добавить токен", callback_data="add_token", icon_custom_emoji_id="5472096095280572227", style="primary")],
+        [InlineKeyboardButton(text="➕ Массовое добавление", callback_data="mass_add_tokens", icon_custom_emoji_id="5472096095280572227", style="default")],
+        [InlineKeyboardButton(text="📱 Войти по номеру", callback_data="phone_login", icon_custom_emoji_id="5472096095280572227", style="primary")],
+        [InlineKeyboardButton(text="📝 Мои шаблоны", callback_data="my_templates", icon_custom_emoji_id="5275979556308674886", style="primary")],
+        [InlineKeyboardButton(text="📊 Статистика аккаунтов", callback_data="account_stats", icon_custom_emoji_id="5278753302023004775", style="primary")],
+        [InlineKeyboardButton(text="👤 Мой профиль", callback_data="my_profile", icon_custom_emoji_id="5275979556308674886", style="primary")],
+        [InlineKeyboardButton(text="💰 Подписка", callback_data="buy_sub", icon_custom_emoji_id="5195058841988914267", style="success")],
+    ]
+    if uid in ADMIN_IDS:
+        buttons.append([InlineKeyboardButton(text="👑 Админ", callback_data="admin_panel", style="danger")])
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
+
+def back_button(callback_data="back_to_main"):
+    return InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="◀️ Назад", callback_data=callback_data, style="default")]])
 
 # ========================== FSM ==========================
 class BotStates(StatesGroup):
@@ -421,38 +236,12 @@ class BotStates(StatesGroup):
     admin_user_id = State()
     admin_days = State()
 
-# ========================== ПРОВЕРКА ПОДПИСКИ ==========================
-async def has_subscription(user_id):
-    if user_id in ADMIN_IDS:
-        return True
-    sub = get_user_subscription(user_id)
-    return sub and sub > datetime.now()
-
-# ========================== КЛАВИАТУРЫ ==========================
-def main_menu(uid):
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="📨 Рассылка друзьям", callback_data="start_mailing", icon_custom_emoji_id="5472096095280572227", style="primary")],
-        [InlineKeyboardButton(text="🔑 Добавить токен", callback_data="add_token", icon_custom_emoji_id="5472096095280572227", style="primary")],
-        [InlineKeyboardButton(text="➕ Массовое добавление", callback_data="mass_add_tokens", icon_custom_emoji_id="5472096095280572227", style="default")],
-        [InlineKeyboardButton(text="📱 Войти по номеру", callback_data="phone_login", icon_custom_emoji_id="5472096095280572227", style="primary")],
-        [InlineKeyboardButton(text="📝 Мои шаблоны", callback_data="my_templates", icon_custom_emoji_id="5275979556308674886", style="primary")],
-        [InlineKeyboardButton(text="📊 Статистика аккаунтов", callback_data="account_stats", icon_custom_emoji_id="5278753302023004775", style="primary")],
-        [InlineKeyboardButton(text="👤 Мой профиль", callback_data="my_profile", icon_custom_emoji_id="5275979556308674886", style="primary")],
-        [InlineKeyboardButton(text="💰 Подписка", callback_data="buy_sub", icon_custom_emoji_id="5195058841988914267", style="success")],
-    ])
-    if uid in ADMIN_IDS:
-        kb.inline_keyboard.append([InlineKeyboardButton(text="👑 Админ", callback_data="admin_panel", style="danger")])
-    return kb
-
-def back_button(callback_data="back_to_main"):
-    return InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="◀️ Назад", callback_data=callback_data, style="default")]])
-
-# ========================== ОСНОВНЫЕ ОБРАБОТЧИКИ ==========================
+# ========================== ОБРАБОТЧИКИ ==========================
 @dp.message(Command("start"))
 async def cmd_start(message: Message, state: FSMContext):
     await state.clear()
     uid = message.from_user.id
-    add_user(uid, message.from_user.username, message.from_user.first_name)
+    await add_user(uid, message.from_user.username, message.from_user.first_name)
     welcome = (
         f"<tg-emoji emoji-id='5278611606756942667'></tg-emoji> <b>VK Рассыльщик</b>\n\n"
         f"Отправляй сообщения только друзьям.\n"
@@ -460,7 +249,7 @@ async def cmd_start(message: Message, state: FSMContext):
     )
     await message.answer(welcome, parse_mode="HTML", reply_markup=main_menu(uid))
 
-# ---- Добавление одного токена ----
+# ----- Добавление токена -----
 @dp.callback_query(lambda c: c.data == "add_token")
 async def add_token_prompt(callback: CallbackQuery, state: FSMContext):
     if not await has_subscription(callback.from_user.id):
@@ -479,21 +268,21 @@ async def process_token(message: Message, state: FSMContext):
         await message.answer("❌ Токен не может быть пустым.")
         return
     msg = await message.answer("🔄 Проверка токена...")
-    valid, first_name, last_name, phone, vk_id = validate_vk_token(token)
+    valid, fn, ln, phone, vid = validate_vk_token(token)
     if not valid:
         await msg.delete()
-        await message.answer(f"<tg-emoji emoji-id='5276240711795107620'></tg-emoji> Ошибка: {first_name}", parse_mode="HTML")
+        await message.answer(f"<tg-emoji emoji-id='5276240711795107620'></tg-emoji> Ошибка: {fn}", parse_mode="HTML")
         return
-    name = f"{first_name} {last_name}"
-    add_vk_token(message.from_user.id, token, name)
+    name = f"{fn} {ln}"
+    await add_vk_token(message.from_user.id, token, name)
     await msg.delete()
     await message.answer(
         f"<tg-emoji emoji-id='5472096095280572227'></tg-emoji> Аккаунт добавлен\n"
-        f"👤 {name}\n🤙 {phone}\n🆔 {vk_id}\n\n✅ Токен валиден",
+        f"👤 {name}\n🤙 {phone}\n🆔 {vid}\n\n✅ Токен валиден",
         parse_mode="HTML", reply_markup=main_menu(message.from_user.id))
     await state.clear()
 
-# ---- Массовое добавление токенов ----
+# ----- Массовое добавление -----
 @dp.callback_query(lambda c: c.data == "mass_add_tokens")
 async def mass_add_prompt(callback: CallbackQuery, state: FSMContext):
     if not await has_subscription(callback.from_user.id):
@@ -501,7 +290,7 @@ async def mass_add_prompt(callback: CallbackQuery, state: FSMContext):
         return
     await callback.answer()
     await callback.message.edit_text(
-        "📦 Отправьте список токенов в формате:\n\n`токен1 | Название1`\n`токен2 | Название2`\n\nПример:\nvk1... | Мой основной\nvk2...\n\nТокены будут проверены и добавлены.",
+        "📦 Отправьте список токенов в формате:\n\n`токен1 | Название1`\n`токен2 | Название2`\n\nТокены будут проверены и добавлены.",
         parse_mode="Markdown", reply_markup=None)
     await state.set_state(BotStates.waiting_mass_tokens)
 
@@ -522,12 +311,12 @@ async def process_mass_tokens(message: Message, state: FSMContext):
             continue
         if not name:
             name = f"{fn} {ln}"
-        add_vk_token(message.from_user.id, token, name)
+        await add_vk_token(message.from_user.id, token, name)
         added += 1
     await message.answer(f"✅ Добавлено {added} аккаунтов.", reply_markup=main_menu(message.from_user.id))
     await state.clear()
 
-# ---- Вход по номеру телефона с поддержкой 2FA ----
+# ----- Вход по номеру телефона (с 2FA) -----
 @dp.callback_query(lambda c: c.data == "phone_login")
 async def phone_login_start(callback: CallbackQuery, state: FSMContext):
     if not await has_subscription(callback.from_user.id):
@@ -563,8 +352,7 @@ async def phone_login_get_password(message: Message, state: FSMContext):
             await state.clear()
             return
         elif e.code == 17:
-            # Запрос 2FA кода
-            await state.update_data(vk_session=vk_session, login=login, password=password)
+            await state.update_data(vk_session=vk_session)
             await message.answer("📱 Введите код двухфакторной аутентификации из SMS/приложения:")
             await state.set_state(BotStates.waiting_2fa)
             return
@@ -576,19 +364,14 @@ async def phone_login_get_password(message: Message, state: FSMContext):
             await message.answer(f"❌ Ошибка VK: {e}")
             await state.clear()
             return
-    except Exception as e:
-        await message.answer(f"❌ Ошибка: {e}")
-        await state.clear()
-        return
-
-    # Успешная авторизация без 2FA
+    # успешная авторизация без 2FA
     valid, fn, ln, phone, vid = validate_vk_token(token)
     if not valid:
         await message.answer(f"❌ Ошибка проверки токена: {fn}")
         await state.clear()
         return
     name = f"{fn} {ln}"
-    add_vk_token(message.from_user.id, token, name)
+    await add_vk_token(message.from_user.id, token, name)
     await message.answer(
         f"<tg-emoji emoji-id='5472096095280572227'></tg-emoji> Аккаунт добавлен через номер телефона\n"
         f"👤 {name}\n🤙 {phone}\n🆔 {vid}",
@@ -613,20 +396,20 @@ async def phone_login_2fa(message: Message, state: FSMContext):
         await state.clear()
         return
     name = f"{fn} {ln}"
-    add_vk_token(message.from_user.id, token, name)
+    await add_vk_token(message.from_user.id, token, name)
     await message.answer(
         f"<tg-emoji emoji-id='5472096095280572227'></tg-emoji> Аккаунт добавлен через номер телефона (с 2FA)\n"
         f"👤 {name}\n🤙 {phone}\n🆔 {vid}",
         parse_mode="HTML", reply_markup=main_menu(message.from_user.id))
     await state.clear()
 
-# ---- Статистика аккаунтов ----
+# ----- Статистика аккаунтов -----
 @dp.callback_query(lambda c: c.data == "account_stats")
 async def show_account_stats(callback: CallbackQuery):
     if not await has_subscription(callback.from_user.id):
         await callback.answer("Нет подписки!", show_alert=True)
         return
-    stats = get_all_user_stats(callback.from_user.id)
+    stats = await get_all_user_stats(callback.from_user.id)
     if not stats:
         await callback.message.edit_text("📭 Нет добавленных аккаунтов.", reply_markup=back_button())
         return
@@ -636,14 +419,14 @@ async def show_account_stats(callback: CallbackQuery):
         text += f"{status} <b>{s['name']}</b>\n   ✅ Отправлено: {s['sent']}\n   ❌ Ошибок: {s['errors']}\n   🕒 Последний раз: {s['last_used']}\n\n"
     await callback.message.edit_text(text, parse_mode="HTML", reply_markup=back_button())
 
-# ---- Шаблоны с экспортом/импортом ----
+# ----- Шаблоны (с экспортом/импортом) -----
 @dp.callback_query(lambda c: c.data == "my_templates")
 async def templates_menu(callback: CallbackQuery):
     if not await has_subscription(callback.from_user.id):
         await callback.answer("Нет подписки!", show_alert=True)
         return
     uid = callback.from_user.id
-    tpls = get_templates(uid)
+    tpls = await get_templates(uid)
     if not tpls:
         kb = InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="➕ Создать", callback_data="create_template", style="primary")],
@@ -699,14 +482,14 @@ async def get_tpl_delay(message: Message, state: FSMContext):
     data = await state.get_data()
     name = data.get('tpl_name')
     content = data.get('tpl_content')
-    save_template(message.from_user.id, name, content, delay)
+    await save_template(message.from_user.id, name, content, delay)
     await message.answer(f"✅ Шаблон <b>{name}</b> сохранён!", parse_mode="HTML", reply_markup=main_menu(message.from_user.id))
     await state.clear()
 
 @dp.callback_query(lambda c: c.data == "export_templates")
 async def export_templates_handler(callback: CallbackQuery):
     uid = callback.from_user.id
-    data = export_templates_json(uid)
+    data = await export_templates_json(uid)
     if not data:
         await callback.answer("Нет шаблонов для экспорта", show_alert=True)
         return
@@ -732,7 +515,7 @@ async def process_import_templates(message: Message, state: FSMContext):
         data = json.loads(file_bytes.read().decode('utf-8'))
         if not isinstance(data, list):
             raise ValueError
-        import_templates_json(message.from_user.id, data)
+        await import_templates_json(message.from_user.id, data)
         await message.answer(f"✅ Импортировано {len(data)} шаблонов.", reply_markup=main_menu(message.from_user.id))
     except:
         await message.answer("❌ Неверный формат файла. Загрузите корректный JSON.")
@@ -741,7 +524,7 @@ async def process_import_templates(message: Message, state: FSMContext):
 @dp.callback_query(lambda c: c.data == "delete_template")
 async def delete_template_menu(callback: CallbackQuery):
     uid = callback.from_user.id
-    tpls = get_templates(uid)
+    tpls = await get_templates(uid)
     if not tpls:
         await callback.answer("Нет шаблонов", show_alert=True)
         return
@@ -754,11 +537,11 @@ async def delete_template_menu(callback: CallbackQuery):
 @dp.callback_query(lambda c: c.data.startswith("del_tpl_"))
 async def confirm_delete_template(callback: CallbackQuery):
     tpl_id = int(callback.data.split("_")[2])
-    delete_template(tpl_id, callback.from_user.id)
+    await delete_template(tpl_id, callback.from_user.id)
     await callback.answer("Шаблон удалён", show_alert=True)
     await templates_menu(callback)
 
-# ---- Подписка ----
+# ----- Подписка -----
 @dp.callback_query(lambda c: c.data == "buy_sub")
 async def buy_sub_menu(callback: CallbackQuery):
     await callback.answer()
@@ -798,14 +581,14 @@ async def check_pay(callback: CallbackQuery):
     else:
         await callback.answer("⏳ Оплата не найдена", show_alert=True)
 
-# ---- РАССЫЛКА ТОЛЬКО ДРУЗЬЯМ (с ротацией аккаунтов) ----
+# ----- РАССЫЛКА ТОЛЬКО ДРУЗЬЯМ (ротация аккаунтов) -----
 @dp.callback_query(lambda c: c.data == "start_mailing")
 async def start_mailing(callback: CallbackQuery, state: FSMContext):
     await callback.answer()
     if not await has_subscription(callback.from_user.id):
         await callback.message.edit_text("❌ Нет подписки", reply_markup=back_button())
         return
-    tokens = get_all_tokens(callback.from_user.id)
+    tokens = await get_all_tokens(callback.from_user.id)
     if not tokens:
         await callback.message.edit_text("❌ Нет добавленных аккаунтов. Добавьте токен или войдите по номеру.", reply_markup=back_button())
         return
@@ -832,21 +615,15 @@ async def get_newsletter_delay(message: Message, state: FSMContext):
     text = data.get('text')
     tokens = data.get('tokens')
     await state.clear()
-    # Определяем активный токен для получения списка друзей (используем первый активный)
-    active_token = None
-    for t in tokens:
-        if t[3] == 1:
-            active_token = t
-            break
-    if not active_token:
-        active_token = tokens[0]
-    token_id, token, token_name = active_token
-    # Проверяем валидность токена
+    # активный токен для получения списка друзей
+    active = await get_active_token(message.from_user.id)
+    if not active:
+        active = tokens[0]
+    token_id, token, token_name = active
     valid, fn, ln, phone, vid = validate_vk_token(token)
     if not valid:
         await message.answer(f"❌ Аккаунт {token_name} невалиден: {fn}\nПожалуйста, добавьте новый или активируйте другой.", reply_markup=main_menu(message.from_user.id))
         return
-    # Загружаем друзей
     try:
         friends = get_friends(token)
     except Exception as e:
@@ -866,10 +643,10 @@ async def get_newsletter_delay(message: Message, state: FSMContext):
         success, err = send_vk_message(ttoken, friend['peer_id'], text)
         if success:
             sent += 1
-            update_token_stats(tid, sent=1)
+            await update_token_stats(tid, sent=1)
         else:
             errors += 1
-            update_token_stats(tid, errors=1)
+            await update_token_stats(tid, errors=1)
         if idx % 5 == 0 or idx == total:
             await progress_msg.edit_text(f"📊 Прогресс: {idx}/{total} | ✅{sent} ❌{errors}")
         token_idx += 1
@@ -883,11 +660,11 @@ async def get_newsletter_delay(message: Message, state: FSMContext):
         parse_mode="HTML", reply_markup=main_menu(message.from_user.id))
     await progress_msg.delete()
 
-# ---- Профиль ----
+# ----- Профиль -----
 @dp.callback_query(lambda c: c.data == "my_profile")
 async def show_profile(callback: CallbackQuery):
     uid = callback.from_user.id
-    sub = get_user_subscription(uid)
+    sub = await get_user_subscription(uid)
     sub_text = sub.strftime('%d.%m.%Y %H:%M') if sub else "Нет"
     if uid in ADMIN_IDS:
         sub_text = "🔹 Вечная"
@@ -897,7 +674,7 @@ async def show_profile(callback: CallbackQuery):
             f"⏳ Подписка до: {sub_text}")
     await callback.message.edit_text(text, parse_mode="HTML", reply_markup=back_button())
 
-# ---- Админ-панель ----
+# ----- Админ-панель -----
 @dp.callback_query(lambda c: c.data == "admin_panel" and c.from_user.id in ADMIN_IDS)
 async def admin_panel(callback: CallbackQuery):
     kb = InlineKeyboardMarkup(inline_keyboard=[
@@ -910,14 +687,8 @@ async def admin_panel(callback: CallbackQuery):
 
 @dp.callback_query(lambda c: c.data == "admin_stats" and c.from_user.id in ADMIN_IDS)
 async def admin_stats(callback: CallbackQuery):
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    c.execute('SELECT COUNT(*) FROM users')
-    users = c.fetchone()[0]
-    c.execute('SELECT COUNT(*) FROM vk_tokens')
-    tokens = c.fetchone()[0]
-    conn.close()
-    await callback.message.edit_text(f"📊 Статистика бота\n👥 Пользователей: {users}\n🔑 Токенов: {tokens}", reply_markup=back_button("admin_panel"))
+    stats = await get_bot_stats()
+    await callback.message.edit_text(f"📊 Статистика бота\n👥 Пользователей: {stats['users']}\n🔑 Токенов: {stats['tokens']}", reply_markup=back_button("admin_panel"))
 
 @dp.callback_query(lambda c: c.data == "admin_broadcast" and c.from_user.id in ADMIN_IDS)
 async def admin_broadcast_prompt(callback: CallbackQuery, state: FSMContext):
@@ -927,11 +698,7 @@ async def admin_broadcast_prompt(callback: CallbackQuery, state: FSMContext):
 @dp.message(BotStates.admin_broadcast)
 async def admin_broadcast_send(message: Message, state: FSMContext):
     text = message.text
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    c.execute('SELECT telegram_id FROM users')
-    users = [row[0] for row in c.fetchall()]
-    conn.close()
+    users = await get_all_users()
     sent = 0
     for uid in users:
         try:
@@ -970,11 +737,10 @@ async def admin_give_days(message: Message, state: FSMContext):
         return
     data = await state.get_data()
     target = data.get('target')
-    set_subscription(target, days)
+    await set_subscription(target, days)
     await message.answer(f"✅ Пользователю {target} выдана подписка на {days} дн.", reply_markup=main_menu(message.from_user.id))
     await state.clear()
 
-# ---- Возврат в главное меню ----
 @dp.callback_query(lambda c: c.data == "back_to_main")
 async def back_to_main(callback: CallbackQuery, state: FSMContext):
     await callback.answer()
@@ -983,8 +749,8 @@ async def back_to_main(callback: CallbackQuery, state: FSMContext):
 
 # ========================== ЗАПУСК ==========================
 async def on_startup():
-    init_db()
-    logger.info("✅ Бот запущен")
+    await init_db()
+    logger.info("✅ База данных инициализирована (PostgreSQL)")
 
 async def main():
     await on_startup()
