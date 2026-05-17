@@ -430,14 +430,14 @@ async def has_subscription(user_id):
 # ========================== КЛАВИАТУРЫ ==========================
 def main_menu(uid):
     kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="📨 Рассылка друзьям", callback_data="start_mailing", icon_custom_emoji_id="5472096095280572227", style="primary")],
-        [InlineKeyboardButton(text="🔑 Добавить токен", callback_data="add_token", icon_custom_emoji_id="5472096095280572227", style="primary")],
-        [InlineKeyboardButton(text="➕ Массовое добавление", callback_data="mass_add_tokens", icon_custom_emoji_id="5472096095280572227", style="default")],
-        [InlineKeyboardButton(text="📱 Войти по номеру", callback_data="phone_login", icon_custom_emoji_id="5472096095280572227", style="primary")],
-        [InlineKeyboardButton(text="📝 Мои шаблоны", callback_data="my_templates", icon_custom_emoji_id="5275979556308674886", style="primary")],
-        [InlineKeyboardButton(text="📊 Статистика аккаунтов", callback_data="account_stats", icon_custom_emoji_id="5278753302023004775", style="primary")],
-        [InlineKeyboardButton(text="👤 Мой профиль", callback_data="my_profile", icon_custom_emoji_id="5275979556308674886", style="primary")],
-        [InlineKeyboardButton(text="💰 Подписка", callback_data="buy_sub", icon_custom_emoji_id="5195058841988914267", style="success")],
+        [InlineKeyboardButton(text=" Рассылка друзьям", callback_data="start_mailing", icon_custom_emoji_id="5472096095280572227", style="primary")],
+        [InlineKeyboardButton(text=" Добавить токен", callback_data="add_token", icon_custom_emoji_id="5472096095280572227", style="primary")],
+        [InlineKeyboardButton(text=" Массовое добавление", callback_data="mass_add_tokens", icon_custom_emoji_id="5472096095280572227", style="default")],
+        [InlineKeyboardButton(text=" Войти по номеру", callback_data="phone_login", icon_custom_emoji_id="5472096095280572227", style="primary")],
+        [InlineKeyboardButton(text=" Мои шаблоны", callback_data="my_templates", icon_custom_emoji_id="5275979556308674886", style="primary")],
+        [InlineKeyboardButton(text=" Статистика аккаунтов", callback_data="account_stats", icon_custom_emoji_id="5278753302023004775", style="primary")],
+        [InlineKeyboardButton(text=" Мой профиль", callback_data="my_profile", icon_custom_emoji_id="5275979556308674886", style="primary")],
+        [InlineKeyboardButton(text=" Подписка", callback_data="buy_sub", icon_custom_emoji_id="5195058841988914267", style="success")],
     ])
     if uid in ADMIN_IDS:
         kb.inline_keyboard.append([InlineKeyboardButton(text="👑 Админ", callback_data="admin_panel", style="danger")])
