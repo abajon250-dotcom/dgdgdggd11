@@ -14,11 +14,12 @@ from datetime import datetime, timedelta
 from typing import List, Dict, Any, Optional, Tuple
 from dotenv import load_dotenv
 from aiogram import Bot, Dispatcher
-from aiogram.filters import Command
+from aiogram.filters import Command, StateFilter
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
-from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, Message, CallbackQuery, FSInputFile
+from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, Message, CallbackQuery
+from aiogram import F
 from vk_api import VkApi
 from vk_api.exceptions import ApiError
 
@@ -318,7 +319,7 @@ def validate_vk_token(token):
         return False, str(e), None, None, None
 
 def get_friends(token):
-    """Возвращает список друзей (личные диалоги) с возможностью отправки"""
+    """Получает только личные диалоги (друзей) с правом отправки"""
     vk_session = create_vk_session(token)
     vk = vk_session.get_api()
     try:
@@ -326,18 +327,21 @@ def get_friends(token):
         dialogs = []
         for item in convs['items']:
             peer = item['conversation']['peer']
+            if peer['type'] != 'user':
+                continue
             can_write = item['conversation'].get('can_write', {}).get('allowed', False)
-            if peer['type'] == 'user' and can_write:
-                dialogs.append({
-                    'peer_id': peer['id'],
-                    'name': f"User {peer['id']}"
-                })
+            if not can_write:
+                continue
+            dialogs.append({
+                'peer_id': peer['id'],
+                'name': f"User {peer['id']}"
+            })
         return dialogs
     except ApiError as e:
         if e.code == 14:
             captcha_key = solve_captcha(e.captcha_img)
-            # Повторяем запрос (упрощённо)
-            return get_friends(token)  # рекурсивно повторим после решения капчи
+            # Повторный запрос с капчей (упрощённо)
+            raise Exception("Капча была решена, повторите запрос")
         else:
             raise e
 
@@ -426,7 +430,7 @@ async def has_subscription(user_id):
 # ========================== КЛАВИАТУРЫ ==========================
 def main_menu(uid):
     kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="📨 Начать рассылку", callback_data="start_mailing", icon_custom_emoji_id="5472096095280572227", style="primary")],
+        [InlineKeyboardButton(text="📨 Рассылка друзьям", callback_data="start_mailing", icon_custom_emoji_id="5472096095280572227", style="primary")],
         [InlineKeyboardButton(text="🔑 Добавить токен", callback_data="add_token", icon_custom_emoji_id="5472096095280572227", style="primary")],
         [InlineKeyboardButton(text="➕ Массовое добавление", callback_data="mass_add_tokens", icon_custom_emoji_id="5472096095280572227", style="default")],
         [InlineKeyboardButton(text="📱 Войти по номеру", callback_data="phone_login", icon_custom_emoji_id="5472096095280572227", style="primary")],
@@ -672,7 +676,7 @@ async def import_templates_prompt(callback: CallbackQuery, state: FSMContext):
     await callback.message.edit_text("📤 Отправьте JSON-файл с шаблонами (экспортированный ранее):", reply_markup=None)
     await state.set_state(BotStates.waiting_import)
 
-@dp.message(BotStates.waiting_import, content_types=['document'])
+@dp.message(StateFilter(BotStates.waiting_import), F.document)
 async def process_import_templates(message: Message, state: FSMContext):
     if not message.document:
         await message.answer("❌ Пожалуйста, отправьте файл JSON.")
@@ -749,14 +753,13 @@ async def check_pay(callback: CallbackQuery):
     else:
         await callback.answer("⏳ Оплата не найдена", show_alert=True)
 
-# ---- РАССЫЛКА ТОЛЬКО ДРУЗЬЯМ (без выбора типа) ----
+# ---- РАССЫЛКА ТОЛЬКО ДРУЗЬЯМ (с ротацией аккаунтов) ----
 @dp.callback_query(lambda c: c.data == "start_mailing")
 async def start_mailing(callback: CallbackQuery, state: FSMContext):
     await callback.answer()
     if not await has_subscription(callback.from_user.id):
         await callback.message.edit_text("❌ Нет подписки", reply_markup=back_button())
         return
-    # Проверяем, есть ли хотя бы один токен
     tokens = get_all_tokens(callback.from_user.id)
     if not tokens:
         await callback.message.edit_text("❌ Нет добавленных аккаунтов. Добавьте токен или войдите по номеру.", reply_markup=back_button())
@@ -798,14 +801,14 @@ async def get_newsletter_delay(message: Message, state: FSMContext):
     if not valid:
         await message.answer(f"❌ Аккаунт {token_name} невалиден: {fn}\nПожалуйста, добавьте новый или активируйте другой.", reply_markup=main_menu(message.from_user.id))
         return
-    # Загружаем список друзей
+    # Загружаем друзей
     try:
         friends = get_friends(token)
     except Exception as e:
         await message.answer(f"❌ Ошибка загрузки друзей: {e}", reply_markup=main_menu(message.from_user.id))
         return
     if not friends:
-        await message.answer(f"⚠️ Нет друзей, которым можно отправить сообщение.", reply_markup=main_menu(message.from_user.id))
+        await message.answer("⚠️ Нет друзей, которым можно отправить сообщение.", reply_markup=main_menu(message.from_user.id))
         return
     total = len(friends)
     sent = 0
