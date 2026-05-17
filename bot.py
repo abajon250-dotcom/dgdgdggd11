@@ -45,7 +45,6 @@ DB_PATH = "bot_database.db"
 def init_db():
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
-    # Users
     c.execute('''CREATE TABLE IF NOT EXISTS users (
         telegram_id INTEGER PRIMARY KEY,
         username TEXT,
@@ -53,7 +52,6 @@ def init_db():
         subscription_until TIMESTAMP,
         joined_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     )''')
-    # VK tokens (много на пользователя)
     c.execute('''CREATE TABLE IF NOT EXISTS vk_tokens (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         user_id INTEGER,
@@ -64,7 +62,6 @@ def init_db():
         last_checked TIMESTAMP,
         stats TEXT DEFAULT '{}'
     )''')
-    # Templates
     c.execute('''CREATE TABLE IF NOT EXISTS templates (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         user_id INTEGER,
@@ -73,7 +70,6 @@ def init_db():
         delay REAL DEFAULT 3.0,
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     )''')
-    # Invoices
     c.execute('''CREATE TABLE IF NOT EXISTS invoices (
         invoice_id TEXT PRIMARY KEY,
         user_id INTEGER,
@@ -321,7 +317,8 @@ def validate_vk_token(token):
     except Exception as e:
         return False, str(e), None, None, None
 
-def get_dialogs_by_type(token, dialog_type):
+def get_friends(token):
+    """Возвращает список друзей (личные диалоги) с возможностью отправки"""
     vk_session = create_vk_session(token)
     vk = vk_session.get_api()
     try:
@@ -330,30 +327,17 @@ def get_dialogs_by_type(token, dialog_type):
         for item in convs['items']:
             peer = item['conversation']['peer']
             can_write = item['conversation'].get('can_write', {}).get('allowed', False)
-            if not can_write:
-                continue
-            peer_type = peer['type']
-            if dialog_type == 'friends' and peer_type != 'user':
-                continue
-            if dialog_type == 'chats' and peer_type != 'chat':
-                continue
-            if dialog_type == 'groups' and peer_type != 'group':
-                continue
-            if dialog_type == 'all':
-                pass
-            if peer_type == 'user':
-                name = f"User {peer['id']}"
-            elif peer_type == 'chat':
-                name = item['conversation'].get('chat_settings', {}).get('title', f"Chat {peer['id']}")
-            else:
-                name = f"Group {peer['id']}"
-            dialogs.append({'peer_id': peer['id'], 'name': name, 'type': peer_type})
+            if peer['type'] == 'user' and can_write:
+                dialogs.append({
+                    'peer_id': peer['id'],
+                    'name': f"User {peer['id']}"
+                })
         return dialogs
     except ApiError as e:
         if e.code == 14:
             captcha_key = solve_captcha(e.captcha_img)
-            # Повторяем запрос с капчей (упрощённо, в реальности нужен повторный вызов)
-            raise Exception("Капча была решена, повторите запрос")
+            # Повторяем запрос (упрощённо)
+            return get_friends(token)  # рекурсивно повторим после решения капчи
         else:
             raise e
 
@@ -422,7 +406,6 @@ class BotStates(StatesGroup):
     waiting_mass_tokens = State()
     waiting_phone = State()
     waiting_password = State()
-    waiting_newsletter_type = State()
     waiting_newsletter_text = State()
     waiting_delay = State()
     waiting_template_name = State()
@@ -467,7 +450,7 @@ async def cmd_start(message: Message, state: FSMContext):
     add_user(uid, message.from_user.username, message.from_user.first_name)
     welcome = (
         f"<tg-emoji emoji-id='5278611606756942667'></tg-emoji> <b>VK Рассыльщик</b>\n\n"
-        f"Отправляй сообщения друзьям, беседам и группам.\n"
+        f"Отправляй сообщения только друзьям.\n"
         f"💰 Купи подписку для доступа к функциям."
     )
     await message.answer(welcome, parse_mode="HTML", reply_markup=main_menu(uid))
@@ -766,9 +749,9 @@ async def check_pay(callback: CallbackQuery):
     else:
         await callback.answer("⏳ Оплата не найдена", show_alert=True)
 
-# ---- РАССЫЛКА (ротация, групповые получатели) ----
+# ---- РАССЫЛКА ТОЛЬКО ДРУЗЬЯМ (без выбора типа) ----
 @dp.callback_query(lambda c: c.data == "start_mailing")
-async def start_mailing_type(callback: CallbackQuery, state: FSMContext):
+async def start_mailing(callback: CallbackQuery, state: FSMContext):
     await callback.answer()
     if not await has_subscription(callback.from_user.id):
         await callback.message.edit_text("❌ Нет подписки", reply_markup=back_button())
@@ -779,20 +762,6 @@ async def start_mailing_type(callback: CallbackQuery, state: FSMContext):
         await callback.message.edit_text("❌ Нет добавленных аккаунтов. Добавьте токен или войдите по номеру.", reply_markup=back_button())
         return
     await state.update_data(tokens=tokens)
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="👥 Друзья", callback_data="type_friends", style="primary")],
-        [InlineKeyboardButton(text="💬 Беседы", callback_data="type_chats", style="primary")],
-        [InlineKeyboardButton(text="🏢 Группы", callback_data="type_groups", style="primary")],
-        [InlineKeyboardButton(text="🌍 Все", callback_data="type_all", style="primary")],
-        [InlineKeyboardButton(text="◀️ Назад", callback_data="back_to_main", style="default")]
-    ])
-    await callback.message.edit_text("📌 Выберите тип получателей:", reply_markup=kb)
-    await state.set_state(BotStates.waiting_newsletter_type)
-
-@dp.callback_query(lambda c: c.data.startswith("type_"))
-async def choose_type(callback: CallbackQuery, state: FSMContext):
-    dialog_type = callback.data.split("_")[1]
-    await state.update_data(dialog_type=dialog_type)
     await callback.message.edit_text("✏️ Введите текст сообщения (можно HTML):", reply_markup=None)
     await state.set_state(BotStates.waiting_newsletter_text)
 
@@ -812,11 +781,10 @@ async def get_newsletter_delay(message: Message, state: FSMContext):
         await message.answer("❌ Введите число > 0")
         return
     data = await state.get_data()
-    dialog_type = data.get('dialog_type')
     text = data.get('text')
     tokens = data.get('tokens')
     await state.clear()
-    # Определяем активный токен для получения списка диалогов (используем первый активный)
+    # Определяем активный токен для получения списка друзей (используем первый активный)
     active_token = None
     for t in tokens:
         if t[3] == 1:
@@ -830,24 +798,24 @@ async def get_newsletter_delay(message: Message, state: FSMContext):
     if not valid:
         await message.answer(f"❌ Аккаунт {token_name} невалиден: {fn}\nПожалуйста, добавьте новый или активируйте другой.", reply_markup=main_menu(message.from_user.id))
         return
-    # Загружаем диалоги
+    # Загружаем список друзей
     try:
-        dialogs = get_dialogs_by_type(token, dialog_type)
+        friends = get_friends(token)
     except Exception as e:
-        await message.answer(f"❌ Ошибка загрузки диалогов: {e}", reply_markup=main_menu(message.from_user.id))
+        await message.answer(f"❌ Ошибка загрузки друзей: {e}", reply_markup=main_menu(message.from_user.id))
         return
-    if not dialogs:
-        await message.answer(f"⚠️ Нет диалогов типа {dialog_type}.", reply_markup=main_menu(message.from_user.id))
+    if not friends:
+        await message.answer(f"⚠️ Нет друзей, которым можно отправить сообщение.", reply_markup=main_menu(message.from_user.id))
         return
-    total = len(dialogs)
+    total = len(friends)
     sent = 0
     errors = 0
-    progress_msg = await message.answer(f"🚀 Начинаю рассылку {total} получателям с задержкой {delay} сек...")
+    progress_msg = await message.answer(f"🚀 Начинаю рассылку {total} друзьям с задержкой {delay} сек...")
     token_list = tokens  # (id, token, name, is_active)
     token_idx = 0
-    for idx, dialog in enumerate(dialogs, 1):
+    for idx, friend in enumerate(friends, 1):
         tid, ttoken, tname, _ = token_list[token_idx % len(token_list)]
-        success, err = send_vk_message(ttoken, dialog['peer_id'], text)
+        success, err = send_vk_message(ttoken, friend['peer_id'], text)
         if success:
             sent += 1
             update_token_stats(tid, sent=1)
@@ -859,7 +827,7 @@ async def get_newsletter_delay(message: Message, state: FSMContext):
         token_idx += 1
         await asyncio.sleep(delay)
     await message.answer(
-        f"<tg-emoji emoji-id='5206401524200145033'></tg-emoji> <b>Рассылка завершена!</b>\n"
+        f"<tg-emoji emoji-id='5206401524200145033'></tg-emoji> <b>Рассылка друзьям завершена!</b>\n"
         f"📝 Отправлено: {sent}/{total}\n"
         f"   ┣ ✅ Успешно: {sent}\n"
         f"   ┗ ❌ Ошибки: {errors}\n"
