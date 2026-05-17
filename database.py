@@ -11,7 +11,6 @@ async def get_connection():
 
 async def init_db():
     conn = await get_connection()
-    # Таблица users
     await conn.execute('''
         CREATE TABLE IF NOT EXISTS users (
             telegram_id BIGINT PRIMARY KEY,
@@ -21,7 +20,6 @@ async def init_db():
             joined_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     ''')
-    # Таблица vk_tokens
     await conn.execute('''
         CREATE TABLE IF NOT EXISTS vk_tokens (
             id SERIAL PRIMARY KEY,
@@ -34,7 +32,6 @@ async def init_db():
             stats JSONB DEFAULT '{}'
         )
     ''')
-    # Таблица templates
     await conn.execute('''
         CREATE TABLE IF NOT EXISTS templates (
             id SERIAL PRIMARY KEY,
@@ -45,7 +42,6 @@ async def init_db():
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     ''')
-    # Таблица invoices
     await conn.execute('''
         CREATE TABLE IF NOT EXISTS invoices (
             invoice_id TEXT PRIMARY KEY,
@@ -78,7 +74,6 @@ async def set_subscription(telegram_id: int, days: float):
     await conn.execute('UPDATE users SET subscription_until = $1 WHERE telegram_id = $2', until, telegram_id)
     await conn.close()
 
-# ---------- Токены ----------
 async def add_vk_token(user_id: int, token: str, name: str):
     conn = await get_connection()
     await conn.execute('''
@@ -140,7 +135,6 @@ async def get_all_user_stats(user_id: int) -> List[Dict]:
         })
     return result
 
-# ---------- Шаблоны ----------
 async def save_template(user_id: int, name: str, content: str, delay: float):
     conn = await get_connection()
     await conn.execute('''
@@ -169,7 +163,6 @@ async def import_templates_json(user_id: int, data: List[Dict]):
     for item in data:
         await save_template(user_id, item['name'], item['content'], item['delay'])
 
-# ---------- Оплата ----------
 async def create_invoice(invoice_id: str, user_id: int, days: int):
     conn = await get_connection()
     await conn.execute('INSERT INTO invoices (invoice_id, user_id, days) VALUES ($1, $2, $3)', invoice_id, user_id, days)
@@ -186,7 +179,6 @@ async def mark_invoice_paid(invoice_id: str):
     await conn.execute('UPDATE invoices SET status = \'paid\' WHERE invoice_id = $1', invoice_id)
     await conn.close()
 
-# ---------- Дополнительно (для админки) ----------
 async def get_all_users() -> List[int]:
     conn = await get_connection()
     rows = await conn.fetch('SELECT telegram_id FROM users')

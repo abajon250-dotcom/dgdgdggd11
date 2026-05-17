@@ -22,7 +22,6 @@ from aiogram import F
 from vk_api import VkApi
 from vk_api.exceptions import ApiError
 
-# Импорт функций из database.py
 from database import (
     init_db, add_user, get_user_subscription, set_subscription,
     add_vk_token, update_token_stats, get_all_tokens, set_active_token,
@@ -49,7 +48,7 @@ bot = Bot(token=BOT_TOKEN)
 storage = MemoryStorage()
 dp = Dispatcher(storage=storage)
 
-# ========================== VK РАБОТА ==========================
+# ========================== VK HELPERS ==========================
 class SSLDisabledHTTPAdapter(requests.adapters.HTTPAdapter):
     def init_poolmanager(self, *args, **kwargs):
         kwargs['ssl_context'] = ssl._create_unverified_context()
@@ -193,14 +192,14 @@ async def check_payment(user_id):
         pass
     return False
 
-# ========================== ПРОВЕРКА ПОДПИСКИ ==========================
+# ========================== SUBSCRIPTION CHECK ==========================
 async def has_subscription(user_id):
     if user_id in ADMIN_IDS:
         return True
     sub = await get_user_subscription(user_id)
     return sub and sub > datetime.now()
 
-# ========================== КЛАВИАТУРЫ ==========================
+# ========================== KEYBOARDS ==========================
 def main_menu(uid):
     buttons = [
         [InlineKeyboardButton(text="📨 Рассылка друзьям", callback_data="start_mailing", icon_custom_emoji_id="5472096095280572227", style="primary")],
@@ -219,7 +218,7 @@ def main_menu(uid):
 def back_button(callback_data="back_to_main"):
     return InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="◀️ Назад", callback_data=callback_data, style="default")]])
 
-# ========================== FSM ==========================
+# ========================== FSM STATES ==========================
 class BotStates(StatesGroup):
     waiting_token = State()
     waiting_mass_tokens = State()
@@ -236,7 +235,7 @@ class BotStates(StatesGroup):
     admin_user_id = State()
     admin_days = State()
 
-# ========================== ОБРАБОТЧИКИ ==========================
+# ========================== HANDLERS ==========================
 @dp.message(Command("start"))
 async def cmd_start(message: Message, state: FSMContext):
     await state.clear()
@@ -581,7 +580,7 @@ async def check_pay(callback: CallbackQuery):
     else:
         await callback.answer("⏳ Оплата не найдена", show_alert=True)
 
-# ----- РАССЫЛКА ТОЛЬКО ДРУЗЬЯМ (ротация аккаунтов) -----
+# ----- РАССЫЛКА ТОЛЬКО ДРУЗЬЯМ (с ротацией) -----
 @dp.callback_query(lambda c: c.data == "start_mailing")
 async def start_mailing(callback: CallbackQuery, state: FSMContext):
     await callback.answer()
@@ -615,7 +614,6 @@ async def get_newsletter_delay(message: Message, state: FSMContext):
     text = data.get('text')
     tokens = data.get('tokens')
     await state.clear()
-    # активный токен для получения списка друзей
     active = await get_active_token(message.from_user.id)
     if not active:
         active = tokens[0]
@@ -636,7 +634,7 @@ async def get_newsletter_delay(message: Message, state: FSMContext):
     sent = 0
     errors = 0
     progress_msg = await message.answer(f"🚀 Начинаю рассылку {total} друзьям с задержкой {delay} сек...")
-    token_list = tokens  # (id, token, name, is_active)
+    token_list = tokens
     token_idx = 0
     for idx, friend in enumerate(friends, 1):
         tid, ttoken, tname, _ = token_list[token_idx % len(token_list)]
