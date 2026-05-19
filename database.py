@@ -51,8 +51,19 @@ async def init_db():
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     ''')
+    # Добавляем колонку created_at в templates, если её нет (миграция)
+    await conn.execute('''
+        DO $$
+        BEGIN
+            IF NOT EXISTS (SELECT 1 FROM information_schema.columns 
+                           WHERE table_name='templates' AND column_name='created_at') THEN
+                ALTER TABLE templates ADD COLUMN created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP;
+            END IF;
+        END $$;
+    ''')
     await conn.close()
 
+# ----- Users -----
 async def add_user(telegram_id: int, username: str = None, first_name: str = None):
     conn = await get_connection()
     await conn.execute('''
@@ -74,6 +85,7 @@ async def set_subscription(telegram_id: int, days: float):
     await conn.execute('UPDATE users SET subscription_until = $1 WHERE telegram_id = $2', until, telegram_id)
     await conn.close()
 
+# ----- Tokens -----
 async def add_vk_token(user_id: int, token: str, name: str):
     conn = await get_connection()
     await conn.execute('''
@@ -113,10 +125,13 @@ async def delete_token(user_id: int, token_id: int):
     await conn.close()
 
 async def get_active_token(user_id: int) -> Optional[Tuple[int, str, str]]:
+    """Возвращает (id, token, name) активного токена или None"""
     conn = await get_connection()
     row = await conn.fetchrow('SELECT id, token, name FROM vk_tokens WHERE user_id = $1 AND is_active = TRUE', user_id)
     await conn.close()
-    return (row['id'], row['token'], row['name']) if row else None
+    if row:
+        return (row['id'], row['token'], row['name'])
+    return None
 
 async def get_all_user_stats(user_id: int) -> List[Dict]:
     conn = await get_connection()
@@ -135,6 +150,7 @@ async def get_all_user_stats(user_id: int) -> List[Dict]:
         })
     return result
 
+# ----- Templates -----
 async def save_template(user_id: int, name: str, content: str, delay: float):
     conn = await get_connection()
     await conn.execute('''
@@ -163,6 +179,7 @@ async def import_templates_json(user_id: int, data: List[Dict]):
     for item in data:
         await save_template(user_id, item['name'], item['content'], item['delay'])
 
+# ----- Invoices -----
 async def create_invoice(invoice_id: str, user_id: int, days: int):
     conn = await get_connection()
     await conn.execute('INSERT INTO invoices (invoice_id, user_id, days) VALUES ($1, $2, $3)', invoice_id, user_id, days)
@@ -179,6 +196,7 @@ async def mark_invoice_paid(invoice_id: str):
     await conn.execute('UPDATE invoices SET status = \'paid\' WHERE invoice_id = $1', invoice_id)
     await conn.close()
 
+# ----- Admin helpers -----
 async def get_all_users() -> List[int]:
     conn = await get_connection()
     rows = await conn.fetch('SELECT telegram_id FROM users')
