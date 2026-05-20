@@ -11,6 +11,7 @@ async def get_connection():
 
 async def init_db():
     conn = await get_connection()
+    # Таблица users
     await conn.execute('''
         CREATE TABLE IF NOT EXISTS users (
             telegram_id BIGINT PRIMARY KEY,
@@ -20,6 +21,7 @@ async def init_db():
             joined_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     ''')
+    # Таблица vk_tokens
     await conn.execute('''
         CREATE TABLE IF NOT EXISTS vk_tokens (
             id SERIAL PRIMARY KEY,
@@ -32,6 +34,7 @@ async def init_db():
             stats JSONB DEFAULT '{}'
         )
     ''')
+    # Таблица templates
     await conn.execute('''
         CREATE TABLE IF NOT EXISTS templates (
             id SERIAL PRIMARY KEY,
@@ -42,6 +45,7 @@ async def init_db():
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     ''')
+    # Таблица invoices
     await conn.execute('''
         CREATE TABLE IF NOT EXISTS invoices (
             invoice_id TEXT PRIMARY KEY,
@@ -51,7 +55,7 @@ async def init_db():
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     ''')
-    # Добавляем колонку created_at в templates, если её нет (миграция)
+    # Миграция для старых таблиц
     await conn.execute('''
         DO $$
         BEGIN
@@ -99,12 +103,14 @@ async def add_vk_token(user_id: int, token: str, name: str):
 async def update_token_stats(token_id: int, sent: int = 0, errors: int = 0):
     conn = await get_connection()
     row = await conn.fetchrow('SELECT stats FROM vk_tokens WHERE id = $1', token_id)
-    if row:
-        stats = row['stats'] or {}
-        stats['sent'] = stats.get('sent', 0) + sent
-        stats['errors'] = stats.get('errors', 0) + errors
-        stats['last_used'] = datetime.now().isoformat()
-        await conn.execute('UPDATE vk_tokens SET stats = $1 WHERE id = $2', json.dumps(stats), token_id)
+    if row and row['stats'] is not None:
+        stats = row['stats']
+    else:
+        stats = {}
+    stats['sent'] = stats.get('sent', 0) + sent
+    stats['errors'] = stats.get('errors', 0) + errors
+    stats['last_used'] = datetime.now().isoformat()
+    await conn.execute('UPDATE vk_tokens SET stats = $1 WHERE id = $2', json.dumps(stats), token_id)
     await conn.close()
 
 async def get_all_tokens(user_id: int) -> List[Tuple[int, str, str, bool]]:
@@ -125,13 +131,10 @@ async def delete_token(user_id: int, token_id: int):
     await conn.close()
 
 async def get_active_token(user_id: int) -> Optional[Tuple[int, str, str]]:
-    """Возвращает (id, token, name) активного токена или None"""
     conn = await get_connection()
     row = await conn.fetchrow('SELECT id, token, name FROM vk_tokens WHERE user_id = $1 AND is_active = TRUE', user_id)
     await conn.close()
-    if row:
-        return (row['id'], row['token'], row['name'])
-    return None
+    return (row['id'], row['token'], row['name']) if row else None
 
 async def get_all_user_stats(user_id: int) -> List[Dict]:
     conn = await get_connection()
@@ -139,7 +142,7 @@ async def get_all_user_stats(user_id: int) -> List[Dict]:
     await conn.close()
     result = []
     for r in rows:
-        stats = r['stats'] or {}
+        stats = r['stats'] if r['stats'] else {}
         result.append({
             'id': r['id'],
             'name': r['name'],
@@ -162,7 +165,10 @@ async def get_templates(user_id: int) -> List[Tuple[int, str, str, float]]:
     conn = await get_connection()
     rows = await conn.fetch('SELECT id, name, content, delay FROM templates WHERE user_id = $1 ORDER BY created_at DESC', user_id)
     await conn.close()
-    return [(r['id'], r['name'], r['content'], r['delay']) for r in rows]
+    result = []
+    for r in rows:
+        result.append((r['id'], r['name'] or '', r['content'] or '', r['delay']))
+    return result
 
 async def delete_template(template_id: int, user_id: int):
     conn = await get_connection()
@@ -173,7 +179,7 @@ async def export_templates_json(user_id: int) -> List[Dict]:
     conn = await get_connection()
     rows = await conn.fetch('SELECT name, content, delay FROM templates WHERE user_id = $1', user_id)
     await conn.close()
-    return [{'name': r['name'], 'content': r['content'], 'delay': r['delay']} for r in rows]
+    return [{'name': r['name'] or '', 'content': r['content'] or '', 'delay': r['delay']} for r in rows]
 
 async def import_templates_json(user_id: int, data: List[Dict]):
     for item in data:
