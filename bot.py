@@ -290,7 +290,7 @@ async def process_token(message: Message, state: FSMContext):
             f"💡 <b>Что делать:</b>\n"
             f"├ Попробуй еще раз\n"
             f"├ Получи новый токен\n"
-            f"└ Обратись в поддержку @lurique",
+            f"└ Обратись в поддержку @bloodworn",
             parse_mode="HTML")
         return
     name = f"{fn} {ln}"
