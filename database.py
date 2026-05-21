@@ -55,7 +55,19 @@ async def init_db():
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     ''')
-    # Миграция для старых таблиц
+    # Таблица mailings (статистика рассылок)
+    await conn.execute('''
+        CREATE TABLE IF NOT EXISTS mailings (
+            id SERIAL PRIMARY KEY,
+            user_id BIGINT REFERENCES users(telegram_id) ON DELETE CASCADE,
+            token_id INTEGER,
+            total INTEGER,
+            success INTEGER,
+            errors INTEGER,
+            sent_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    ''')
+    # Миграции
     await conn.execute('''
         DO $$
         BEGIN
@@ -103,10 +115,7 @@ async def add_vk_token(user_id: int, token: str, name: str):
 async def update_token_stats(token_id: int, sent: int = 0, errors: int = 0):
     conn = await get_connection()
     row = await conn.fetchrow('SELECT stats FROM vk_tokens WHERE id = $1', token_id)
-    if row and row['stats'] is not None:
-        stats = row['stats']
-    else:
-        stats = {}
+    stats = row['stats'] if row and row['stats'] else {}
     stats['sent'] = stats.get('sent', 0) + sent
     stats['errors'] = stats.get('errors', 0) + errors
     stats['last_used'] = datetime.now().isoformat()
@@ -165,10 +174,7 @@ async def get_templates(user_id: int) -> List[Tuple[int, str, str, float]]:
     conn = await get_connection()
     rows = await conn.fetch('SELECT id, name, content, delay FROM templates WHERE user_id = $1 ORDER BY created_at DESC', user_id)
     await conn.close()
-    result = []
-    for r in rows:
-        result.append((r['id'], r['name'] or '', r['content'] or '', r['delay']))
-    return result
+    return [(r['id'], r['name'] or '', r['content'] or '', r['delay']) for r in rows]
 
 async def delete_template(template_id: int, user_id: int):
     conn = await get_connection()
@@ -202,6 +208,43 @@ async def mark_invoice_paid(invoice_id: str):
     await conn.execute('UPDATE invoices SET status = \'paid\' WHERE invoice_id = $1', invoice_id)
     await conn.close()
 
+# ----- Mailings (статистика) -----
+async def save_mailing_stats(user_id: int, token_id: int, total: int, success: int, errors: int):
+    conn = await get_connection()
+    await conn.execute('''
+        INSERT INTO mailings (user_id, token_id, total, success, errors) VALUES ($1, $2, $3, $4, $5)
+    ''', user_id, token_id, total, success, errors)
+    await conn.close()
+
+async def get_user_mailing_stats(user_id: int) -> Dict:
+    conn = await get_connection()
+    # Всего рассылок
+    total_mailings = await conn.fetchval('SELECT COUNT(*) FROM mailings WHERE user_id = $1', user_id)
+    # За неделю
+    week_ago = datetime.now() - timedelta(days=7)
+    week_mailings = await conn.fetchval('SELECT COUNT(*) FROM mailings WHERE user_id = $1 AND sent_at > $2', user_id, week_ago)
+    # За месяц
+    month_ago = datetime.now() - timedelta(days=30)
+    month_mailings = await conn.fetchval('SELECT COUNT(*) FROM mailings WHERE user_id = $1 AND sent_at > $2', user_id, month_ago)
+    # Всего отправлено сообщений
+    total_sent = await conn.fetchval('SELECT COALESCE(SUM(success),0) FROM mailings WHERE user_id = $1', user_id)
+    total_errors = await conn.fetchval('SELECT COALESCE(SUM(errors),0) FROM mailings WHERE user_id = $1', user_id)
+    # За неделю отправлено
+    week_sent = await conn.fetchval('SELECT COALESCE(SUM(success),0) FROM mailings WHERE user_id = $1 AND sent_at > $2', user_id, week_ago)
+    # Лучший результат
+    best = await conn.fetchrow('SELECT success, sent_at FROM mailings WHERE user_id = $1 ORDER BY success DESC LIMIT 1', user_id)
+    best_result = {'success': best['success'], 'date': best['sent_at']} if best else None
+    await conn.close()
+    return {
+        'total_mailings': total_mailings,
+        'week_mailings': week_mailings,
+        'month_mailings': month_mailings,
+        'total_sent': total_sent,
+        'total_errors': total_errors,
+        'week_sent': week_sent,
+        'best': best_result
+    }
+
 # ----- Admin helpers -----
 async def get_all_users() -> List[int]:
     conn = await get_connection()
@@ -213,5 +256,7 @@ async def get_bot_stats() -> Dict:
     conn = await get_connection()
     total_users = await conn.fetchval('SELECT COUNT(*) FROM users')
     total_tokens = await conn.fetchval('SELECT COUNT(*) FROM vk_tokens')
+    total_mailings = await conn.fetchval('SELECT COUNT(*) FROM mailings')
+    total_sent = await conn.fetchval('SELECT COALESCE(SUM(success),0) FROM mailings')
     await conn.close()
-    return {'users': total_users, 'tokens': total_tokens}
+    return {'users': total_users, 'tokens': total_tokens, 'mailings': total_mailings, 'sent': total_sent}
