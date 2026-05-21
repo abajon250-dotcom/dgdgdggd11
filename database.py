@@ -1,8 +1,8 @@
 import asyncpg
 import os
+import json
 from datetime import datetime, timedelta
 from typing import List, Dict, Optional, Tuple
-import json
 
 DATABASE_URL = os.getenv("DATABASE_URL")
 
@@ -11,7 +11,6 @@ async def get_connection():
 
 async def init_db():
     conn = await get_connection()
-    # Таблица users
     await conn.execute('''
         CREATE TABLE IF NOT EXISTS users (
             telegram_id BIGINT PRIMARY KEY,
@@ -21,7 +20,6 @@ async def init_db():
             joined_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     ''')
-    # Таблица vk_tokens
     await conn.execute('''
         CREATE TABLE IF NOT EXISTS vk_tokens (
             id SERIAL PRIMARY KEY,
@@ -34,7 +32,6 @@ async def init_db():
             stats JSONB DEFAULT '{}'
         )
     ''')
-    # Таблица templates
     await conn.execute('''
         CREATE TABLE IF NOT EXISTS templates (
             id SERIAL PRIMARY KEY,
@@ -45,7 +42,6 @@ async def init_db():
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     ''')
-    # Таблица invoices
     await conn.execute('''
         CREATE TABLE IF NOT EXISTS invoices (
             invoice_id TEXT PRIMARY KEY,
@@ -55,7 +51,6 @@ async def init_db():
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     ''')
-    # Таблица mailings (статистика рассылок)
     await conn.execute('''
         CREATE TABLE IF NOT EXISTS mailings (
             id SERIAL PRIMARY KEY,
@@ -67,7 +62,6 @@ async def init_db():
             sent_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     ''')
-    # Миграции
     await conn.execute('''
         DO $$
         BEGIN
@@ -115,7 +109,13 @@ async def add_vk_token(user_id: int, token: str, name: str):
 async def update_token_stats(token_id: int, sent: int = 0, errors: int = 0):
     conn = await get_connection()
     row = await conn.fetchrow('SELECT stats FROM vk_tokens WHERE id = $1', token_id)
-    stats = row['stats'] if row and row['stats'] else {}
+    if row and row['stats']:
+        if isinstance(row['stats'], str):
+            stats = json.loads(row['stats'])
+        else:
+            stats = row['stats']
+    else:
+        stats = {}
     stats['sent'] = stats.get('sent', 0) + sent
     stats['errors'] = stats.get('errors', 0) + errors
     stats['last_used'] = datetime.now().isoformat()
@@ -151,7 +151,13 @@ async def get_all_user_stats(user_id: int) -> List[Dict]:
     await conn.close()
     result = []
     for r in rows:
-        stats = r['stats'] if r['stats'] else {}
+        raw_stats = r['stats']
+        if raw_stats is None:
+            stats = {}
+        elif isinstance(raw_stats, str):
+            stats = json.loads(raw_stats)
+        else:
+            stats = raw_stats
         result.append({
             'id': r['id'],
             'name': r['name'],
@@ -208,7 +214,7 @@ async def mark_invoice_paid(invoice_id: str):
     await conn.execute('UPDATE invoices SET status = \'paid\' WHERE invoice_id = $1', invoice_id)
     await conn.close()
 
-# ----- Mailings (статистика) -----
+# ----- Mailings -----
 async def save_mailing_stats(user_id: int, token_id: int, total: int, success: int, errors: int):
     conn = await get_connection()
     await conn.execute('''
@@ -218,22 +224,15 @@ async def save_mailing_stats(user_id: int, token_id: int, total: int, success: i
 
 async def get_user_mailing_stats(user_id: int) -> Dict:
     conn = await get_connection()
-    # Всего рассылок
     total_mailings = await conn.fetchval('SELECT COUNT(*) FROM mailings WHERE user_id = $1', user_id)
-    # За неделю
     week_ago = datetime.now() - timedelta(days=7)
     week_mailings = await conn.fetchval('SELECT COUNT(*) FROM mailings WHERE user_id = $1 AND sent_at > $2', user_id, week_ago)
-    # За месяц
     month_ago = datetime.now() - timedelta(days=30)
     month_mailings = await conn.fetchval('SELECT COUNT(*) FROM mailings WHERE user_id = $1 AND sent_at > $2', user_id, month_ago)
-    # Всего отправлено сообщений
     total_sent = await conn.fetchval('SELECT COALESCE(SUM(success),0) FROM mailings WHERE user_id = $1', user_id)
     total_errors = await conn.fetchval('SELECT COALESCE(SUM(errors),0) FROM mailings WHERE user_id = $1', user_id)
-    # За неделю отправлено
     week_sent = await conn.fetchval('SELECT COALESCE(SUM(success),0) FROM mailings WHERE user_id = $1 AND sent_at > $2', user_id, week_ago)
-    # Лучший результат
     best = await conn.fetchrow('SELECT success, sent_at FROM mailings WHERE user_id = $1 ORDER BY success DESC LIMIT 1', user_id)
-    best_result = {'success': best['success'], 'date': best['sent_at']} if best else None
     await conn.close()
     return {
         'total_mailings': total_mailings,
@@ -242,10 +241,10 @@ async def get_user_mailing_stats(user_id: int) -> Dict:
         'total_sent': total_sent,
         'total_errors': total_errors,
         'week_sent': week_sent,
-        'best': best_result
+        'best': {'success': best['success'], 'date': best['sent_at']} if best else None
     }
 
-# ----- Admin helpers -----
+# ----- Admin -----
 async def get_all_users() -> List[int]:
     conn = await get_connection()
     rows = await conn.fetch('SELECT telegram_id FROM users')
